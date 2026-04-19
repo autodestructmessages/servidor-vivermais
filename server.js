@@ -13,21 +13,27 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e7 
 });
 
-// Salas em memória RAM (se desligar o servidor, apaga tudo)
-// Agora vamos guardar os tokens dos celulares que entram na sala!
-const salasAtivas = {}; 
+// Salas em memória RAM
+const salasAtivas = {
+  // Inicializamos a Sala Geral por padrão para que ela sempre exista
+  'SALA GERAL': {
+    senha: null,
+    criador: 'SISTEMA',
+    tokens: []
+  }
+}; 
 
-// 🎯 FUNÇÃO SECRETA: Dispara o "Spam" do Jogo
-async function enviarNotificacao(tokensDestino) {
+// 🎯 FUNÇÃO SECRETA UPGRADED: Agora podemos mudar o texto do Push!
+async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou. Venha bater seu recorde no Reflexo Rápido!') {
   if (!tokensDestino || tokensDestino.length === 0) return;
 
-  // Monta a notificação camuflada
+  // Monta a notificação (camuflada ou de alerta)
   const mensagensPush = tokensDestino.map(token => ({
     to: token,
     sound: 'default',
-    title: '⚡ Energia Recarregada!',
-    body: 'Sua vida no ViverMais recarregou. Venha bater seu recorde no Reflexo Rápido!',
-    data: { segredo: true }, // Dados invisíveis caso queira usar depois
+    title: tituloPush,
+    body: corpoPush,
+    data: { segredo: true }, 
   }));
 
   try {
@@ -40,39 +46,38 @@ async function enviarNotificacao(tokensDestino) {
       },
       body: JSON.stringify(mensagensPush),
     });
-    console.log('🔔 Notificação camuflada disparada com sucesso!');
+    console.log('🔔 Push disparado para', tokensDestino.length, 'aparelho(s)!');
   } catch (error) {
-    console.log('❌ Erro ao enviar push invisível:', error);
+    console.log('❌ Erro ao enviar push:', error);
   }
 }
 
 io.on('connection', (socket) => {
   console.log('⚡ Agente Conectado:', socket.id);
 
-  // Criar Sala com Senha (agora recebe o token)
+  // 1. Criar Sala com Senha
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
     salasAtivas[codigo] = { 
       senha, 
       criador: socket.id,
-      tokens: tokenPush ? [tokenPush] : [] // Inicia a lista de tokens com o criador
+      tokens: tokenPush ? [tokenPush] : [] 
     };
     socket.join(codigo);
     console.log(`🔒 Sala Criada: ${codigo} | Token Registrado: ${tokenPush ? 'Sim' : 'Não'}`);
   });
 
-  // Entrar em Sala Existente (agora recebe o token)
+  // 2. Entrar em Sala Existente
   socket.on('entrar_sala_privada', ({ codigo, senha, tokenPush }, callback) => {
     const sala = salasAtivas[codigo];
     
     if (sala && sala.senha === senha) {
       socket.join(codigo);
       
-      // Adiciona o token do convidado na lista da sala, se não estiver lá
       if (tokenPush && !sala.tokens.includes(tokenPush)) {
         sala.tokens.push(tokenPush);
       }
 
-      console.log(`👤 Agente acessou a sala: ${codigo}`);
+      console.log(`👤 Agente acessou a sala privada: ${codigo}`);
       callback({ status: 'ok' });
     } else {
       console.log(`❌ Tentativa de acesso falha na sala: ${codigo}`);
@@ -80,7 +85,45 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Enviar Mensagem (Texto, Foto ou Áudio)
+  // 🌟 NOVO: Entrar na SALA GERAL
+  socket.on('entrar_sala_geral', ({ tokenPush }) => {
+    const codigo = 'SALA GERAL';
+    socket.join(codigo);
+    
+    const sala = salasAtivas[codigo];
+    
+    if (tokenPush && !sala.tokens.includes(tokenPush)) {
+      sala.tokens.push(tokenPush);
+    }
+
+    console.log(`🌐 Agente acessou a SALA GERAL`);
+
+    // Notifica os OUTROS usuários da sala geral que alguém novo entrou
+    if (sala.tokens.length > 1) {
+      const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
+      // Usamos um texto disfarçado de "Novo Recorde" para avisar que alguém logou
+      enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém acabou de entrar no app ViverMais. Será que vão bater seu recorde?');
+    }
+  });
+
+  // 🚨 NOVO: Disparar Alerta Global
+  socket.on('alerta_global_enviar', (msg) => {
+    console.log(`🚨 ALERTA GLOBAL DISPARADO: ${msg}`);
+    
+    // 1. Emite via Socket para o app vibrar na hora e abrir o Alert na tela (para quem está com app aberto)
+    io.emit('alerta_geral_recebido', msg);
+
+    // 2. Coleta TODOS os tokens de TODAS as salas ativas para mandar um Push Notification (para quem tá com app fechado)
+    const todosTokens = new Set();
+    Object.values(salasAtivas).forEach(sala => {
+      sala.tokens.forEach(t => todosTokens.add(t));
+    });
+
+    // Envia o Push. Aqui o ideal é manter um texto inofensivo, para caso alguém veja a tela bloqueada!
+    enviarNotificacao(Array.from(todosTokens), '⏳ Atualização Diária', 'Lembre-se de fazer seus exercícios mentais diários. Acesse o app agora!');
+  });
+
+  // 3. Enviar Mensagem (Texto, Foto ou Áudio)
   socket.on('enviar_fantasma', (dados) => {
     // Dispara a mensagem para o front-end
     socket.to(dados.sala).emit('receber_fantasma', {
@@ -89,11 +132,11 @@ io.on('connection', (socket) => {
       hora: new Date().toLocaleTimeString()
     });
 
-    // 🚀 LÓGICA DO PUSH: Pega os tokens da sala e avisa que tem mensagem!
+    // PUSH: Pega os tokens da sala e avisa que tem mensagem!
     const sala = salasAtivas[dados.sala];
     if (sala && sala.tokens && sala.tokens.length > 0) {
-      // Idealmente não mandamos push para nós mesmos, então filtramos
       const tokensParaAvisar = sala.tokens.filter(t => t !== dados.tokenRemetente);
+      // Aqui usamos os textos padrão originais disfarçados
       enviarNotificacao(tokensParaAvisar);
     }
   });
