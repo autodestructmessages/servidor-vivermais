@@ -168,7 +168,7 @@ io.on('connection', (socket) => {
       sala.tokens.forEach(t => todosTokens.add(t));
     });
 
-    enviarNotificacao(Array.from(todosTokens), '⏳ Atualização Diária', 'Lembre-se de fazer seus exercícios mentais diários. Acesse o app agora!');
+    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o modo RANKING global. Acesse o app agora!');
   });
 
   // 5. Enviar Mensagem Fantasma (Texto, Foto ou Áudio)
@@ -184,7 +184,8 @@ io.on('connection', (socket) => {
     const sala = salasAtivas[dados.sala];
     if (sala && sala.tokens && sala.tokens.length > 0) {
       const tokensParaAvisar = sala.tokens.filter(t => t !== dados.tokenRemetente);
-      enviarNotificacao(tokensParaAvisar);
+      // Correção: Agora envia texto apropriado para mensagem!
+      enviarNotificacao(tokensParaAvisar, '💬 Nova Recorde!', 'Alguém registrou um novo ranking, acesse agora.');
     }
   });
 
