@@ -60,21 +60,28 @@ function atualizarContagemSala(codigoSala) {
   io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
 }
 
-// 🎯 FUNÇÃO PUSH UPGRADED: Prioridade Máxima Forçada
+// 🎯 FUNÇÃO PUSH COM PRIORIDADE MAX E RASTREIO
 async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou. Venha bater seu recorde no Reflexo Rápido!') {
-  if (!tokensDestino || tokensDestino.length === 0) return;
+  // 1. Limpa os tokens inválidos ou nulos para não travar a API do Expo
+  const validTokens = tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  
+  if (!validTokens || validTokens.length === 0) {
+    console.log('❌ PUSH CANCELADO: Nenhum token válido recebido para enviar a notificação.');
+    return;
+  }
 
-  const mensagensPush = tokensDestino.map(token => ({
+  const mensagensPush = validTokens.map(token => ({
     to: token,
     sound: 'default',
     title: tituloPush,
     body: corpoPush,
-    priority: 'high', // ⚠️ CRUCIAL: Força o Android/iOS a acordar e exibir na hora
+    priority: 'high', // ⚠️ CRUCIAL: Força o Android a acordar e entregar a notificação em Foreground
+    channelId: 'default', // Amarra ao canal MAX configurado no app
     data: { segredo: true }, 
   }));
 
   try {
-    await fetch('https://exp.host/--/api/v2/push/send', {
+    const resposta = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -83,9 +90,12 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
       },
       body: JSON.stringify(mensagensPush),
     });
-    console.log(`🔔 Push (Prioridade HIGH) disparado para ${tokensDestino.length} aparelho(s)!`);
+    
+    // Rastreador detalhado
+    const resultado = await resposta.json();
+    console.log(`🔔 RELATÓRIO PUSH (Tentativa para ${validTokens.length} aparelho(s)):`, JSON.stringify(resultado));
   } catch (error) {
-    console.log('❌ Erro ao enviar push:', error);
+    console.log('❌ Erro Crítico ao enviar push:', error);
   }
 }
 
@@ -185,7 +195,7 @@ io.on('connection', (socket) => {
     if (sala && sala.tokens && sala.tokens.length > 0) {
       const tokensParaAvisar = sala.tokens.filter(t => t !== dados.tokenRemetente);
       // Correção: Agora envia texto apropriado para mensagem!
-      enviarNotificacao(tokensParaAvisar, '💬 Nova Recorde!', 'Alguém registrou um novo ranking, acesse agora.');
+      enviarNotificacao(tokensParaAvisar, '💬 Novo Recorde!', 'Alguém registrou um novo ranking, acesse agora.');
     }
   });
 
