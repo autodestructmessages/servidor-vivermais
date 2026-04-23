@@ -5,17 +5,25 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
+
+// ☕ ROTA DO CAFÉ: Usada por robôs externos para manter o servidor acordado
+app.get('/keepalive', (req, res) => {
+  const data = new Date().toLocaleTimeString();
+  console.log(`☕ [${data}] Bebendo café para não dormir... Servidor imortal!`);
+  res.send('Servidor ViverMais 100% Acordado!');
+});
+
 const server = http.createServer(app);
 
 // ⚠️ OTIMIZAÇÃO MAX: Limite de 10MB + Ajustes para evitar que a conexão hiberne
 const io = new Server(server, { 
   cors: { origin: "*" },
   maxHttpBufferSize: 1e7,
-  pingInterval: 25000, // Dispara verificação a cada 25s
-  pingTimeout: 60000   // Dá até 60s para o celular responder antes de derrubar
+  pingInterval: 25000, 
+  pingTimeout: 60000   
 });
 
-// Salas em memória RAM (Volátil: Desaparece completamente ao reiniciar o servidor)
+// Salas em memória RAM
 const salasAtivas = {
   'SALA_GERAL': {
     senha: null,
@@ -24,49 +32,23 @@ const salasAtivas = {
   }
 }; 
 
-// 🧹 LIXEIRO AUTOMÁTICO DE SALAS VAZIAS (A cada 30 minutos)
-// Impede que o servidor fique com a memória cheia de salas abandonadas
-setInterval(() => {
-  console.log('🧹 Lixeiro passando: Verificando salas inativas...');
-  let salasLimpas = 0;
+// 🛑 LIXEIRO DESATIVADO! 
+// Agora as salas NUNCA mais são apagadas quando os usuários fecham o app. 
+// Os tokens ficarão guardados para receberem os Pushes!
 
-  for (const codigoSala in salasAtivas) {
-    // A regra de ouro: NUNCA apagar a SALA_GERAL
-    if (codigoSala === 'SALA_GERAL') continue;
-
-    // Verifica quantas pessoas estão conectadas fisicamente naquela sala agora
-    const room = io.sockets.adapter.rooms.get(codigoSala);
-    const qtdOnline = room ? room.size : 0;
-
-    // Se a sala estiver totalmente vazia (0 pessoas online), nós a deletamos da RAM
-    if (qtdOnline === 0) {
-      delete salasAtivas[codigoSala];
-      salasLimpas++;
-      console.log(`🗑️ Sala [${codigoSala}] foi apagada da memória.`);
-    }
-  }
-
-  if (salasLimpas > 0) {
-    console.log(`✅ Limpeza concluída: ${salasLimpas} sala(s) fantasma(s) eliminada(s).`);
-  }
-}, 30 * 60 * 1000); // 30 minutos (em milissegundos)
-
-// 👁️ FUNÇÃO NOVA: Rastreador de Usuários Online na Sala
-// Pega direto da placa de rede virtual do Socket, é instantâneo e não pesa na RAM.
+// 👁️ FUNÇÃO: Rastreador de Usuários Online na Sala (Em tempo real)
 function atualizarContagemSala(codigoSala) {
   const room = io.sockets.adapter.rooms.get(codigoSala);
   const qtdOnline = room ? room.size : 0;
-  // Emite a quantidade de pessoas para todos que estão dentro dessa sala específica
   io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
 }
 
-// 🎯 FUNÇÃO PUSH COM PRIORIDADE MAX E RASTREIO
-async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou. Venha bater seu recorde no Reflexo Rápido!') {
-  // 1. Limpa os tokens inválidos ou nulos para não travar a API do Expo
+// 🎯 FUNÇÃO PUSH COM PRIORIDADE MAX
+async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou. Venha bater seu recorde!') {
   const validTokens = tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken'));
   
   if (!validTokens || validTokens.length === 0) {
-    console.log('❌ PUSH CANCELADO: Nenhum token válido recebido para enviar a notificação.');
+    console.log('❌ PUSH CANCELADO: Nenhum token válido recebido.');
     return;
   }
 
@@ -75,8 +57,8 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
     sound: 'default',
     title: tituloPush,
     body: corpoPush,
-    priority: 'high', // ⚠️ CRUCIAL: Força o Android a acordar e entregar a notificação em Foreground
-    channelId: 'default', // Amarra ao canal MAX configurado no app
+    priority: 'high', 
+    channelId: 'default',
     data: { segredo: true }, 
   }));
 
@@ -91,7 +73,6 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
       body: JSON.stringify(mensagensPush),
     });
     
-    // Rastreador detalhado
     const resultado = await resposta.json();
     console.log(`🔔 RELATÓRIO PUSH (Tentativa para ${validTokens.length} aparelho(s)):`, JSON.stringify(resultado));
   } catch (error) {
@@ -102,23 +83,30 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
 io.on('connection', (socket) => {
   console.log('⚡ Agente Conectado:', socket.id);
 
-  // 0. HEARTBEAT MODO FANTASMA: Mantém a conexão aberta e tira do modo 'economia'
   socket.on('ping_fantasma', () => {
     socket.emit('pong_fantasma');
   });
 
   // 1. Criar Sala com Senha
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
-    salasAtivas[codigo] = { 
-      senha, 
-      criador: socket.id,
-      tokens: tokenPush ? [tokenPush] : [] 
-    };
+    // Se a sala não existe, cria. Se já existe, não sobreescreve (para não perder os tokens)
+    if (!salasAtivas[codigo]) {
+      salasAtivas[codigo] = { 
+        senha, 
+        criador: socket.id,
+        tokens: [] 
+      };
+    }
     
-    socket.data.salaAtual = codigo; // Guarda a info para limpar quando desconectar
+    // Adiciona o token de quem criou, se não estiver lá
+    if (tokenPush && !salasAtivas[codigo].tokens.includes(tokenPush)) {
+      salasAtivas[codigo].tokens.push(tokenPush);
+    }
+    
+    socket.data.salaAtual = codigo;
     socket.join(codigo);
     
-    console.log(`🔒 Sala Criada: ${codigo} | Token Registrado: ${tokenPush ? 'Sim' : 'Não'}`);
+    console.log(`🔒 Sala [${codigo}] Ativa | Token Salvo para PUSH!`);
     atualizarContagemSala(codigo);
   });
 
@@ -130,11 +118,12 @@ io.on('connection', (socket) => {
       socket.data.salaAtual = codigo;
       socket.join(codigo);
       
+      // Guarda o token eternamente na sala
       if (tokenPush && !sala.tokens.includes(tokenPush)) {
         sala.tokens.push(tokenPush);
       }
 
-      console.log(`👤 Agente acessou a sala privada: ${codigo}`);
+      console.log(`👤 Agente entrou na sala: ${codigo}`);
       callback({ status: 'ok' });
       atualizarContagemSala(codigo);
     } else {
@@ -143,7 +132,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 3. Entrar na SALA_GERAL (Singleton Seguro)
+  // 3. Entrar na SALA_GERAL
   socket.on('entrar_sala_geral', ({ tokenPush }) => {
     const codigo = 'SALA_GERAL';
     socket.data.salaAtual = codigo;
@@ -158,7 +147,6 @@ io.on('connection', (socket) => {
     console.log(`🌐 Agente acessou a SALA_GERAL`);
     atualizarContagemSala(codigo);
 
-    // Notifica os OUTROS usuários da sala geral que alguém novo entrou
     if (sala.tokens.length > 1) {
       const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
       enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém acabou de entrar no app ViverMais. Será que vão bater seu recorde?');
@@ -168,11 +156,8 @@ io.on('connection', (socket) => {
   // 4. Disparar Alerta Global
   socket.on('alerta_global_enviar', (msg) => {
     console.log(`🚨 ALERTA GLOBAL DISPARADO: ${msg}`);
-    
-    // 1. Emite via Socket para o app vibrar na hora e abrir o Alert na tela 
     io.emit('alerta_geral_recebido', msg);
 
-    // 2. Coleta TODOS os tokens de TODAS as salas ativas para mandar um Push Notification
     const todosTokens = new Set();
     Object.values(salasAtivas).forEach(sala => {
       sala.tokens.forEach(t => todosTokens.add(t));
@@ -183,23 +168,21 @@ io.on('connection', (socket) => {
 
   // 5. Enviar Mensagem Fantasma (Texto, Foto ou Áudio)
   socket.on('enviar_fantasma', (dados) => {
-    // Dispara a mensagem para o front-end (retransmissão em tempo real)
     socket.to(dados.sala).emit('receber_fantasma', {
       ...dados,
       id: Math.random().toString(36).substring(2, 10), 
       hora: new Date().toLocaleTimeString()
     });
 
-    // PUSH: Pega os tokens da sala e avisa que tem mensagem!
     const sala = salasAtivas[dados.sala];
+    // Se a sala existe e tem tokens salvos, dispara o PUSH!
     if (sala && sala.tokens && sala.tokens.length > 0) {
       const tokensParaAvisar = sala.tokens.filter(t => t !== dados.tokenRemetente);
-      // Correção: Agora envia texto apropriado para mensagem!
       enviarNotificacao(tokensParaAvisar, '💬 Novo Recorde!', 'Alguém registrou um novo ranking, acesse agora.');
     }
   });
 
-  // 6. Saída Voluntária da Sala (Para atualizar os números de quem ficou)
+  // 6. Saída Voluntária
   socket.on('sair_sala', () => {
     const salaAtual = socket.data.salaAtual;
     if (salaAtual) {
@@ -210,7 +193,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 7. Desconexão Abrupta (Quando o app é fechado)
+  // 7. Desconexão Abrupta
   socket.on('disconnect', () => {
     console.log('🚫 Agente Desconectado:', socket.id);
     const salaAtual = socket.data.salaAtual;
