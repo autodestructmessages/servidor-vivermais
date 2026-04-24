@@ -65,6 +65,7 @@ app.get('/keepalive', (req, res) => {
 const server = http.createServer(app);
 
 // ⚠️ OTIMIZAÇÃO MAX: Limite de 10MB + Ajustes para evitar que a conexão hiberne
+// Isso é o que garante que o ÁUDIO em Base64 passe sem travar o servidor!
 const io = new Server(server, { 
   cors: { origin: "*" },
   maxHttpBufferSize: 1e7,
