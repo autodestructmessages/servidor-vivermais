@@ -3,8 +3,19 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
-// 🔐 INÍCIO DA BLINDAGEM DO FIREBASE
+// 1️⃣ Salas em memória RAM (Movida para o topo para o Firebase conseguir salvar os dados nela)
+const salasAtivas = {
+  'SALA_GERAL': {
+    senha: null,
+    criador: 'SISTEMA',
+    tokens: []
+  }
+}; 
+
+// 2️⃣ 🔐 INÍCIO DA BLINDAGEM DO FIREBASE
 const admin = require('firebase-admin');
+const { getFirestore } = require('firebase-admin/firestore');
+
 let db = null;
 
 try {
@@ -13,7 +24,10 @@ try {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
-  db = admin.firestore();
+  
+  // 👇 Conectando no banco com o nome correto que você criou no painel: 'vivermais'
+  db = getFirestore('vivermais'); 
+  
   console.log('✅ FIREBASE CONECTADO: Cofre ativado com sucesso!');
 } catch (error) {
   // Se o arquivo não existir ou der erro, o servidor não morre!
@@ -31,12 +45,20 @@ async function carregarTokensDoBanco() {
       console.log(`📦 BEM-VINDO DE VOLTA! ${salasAtivas['SALA_GERAL'].tokens.length} tokens recuperados do cofre.`);
     } else {
       await db.collection('Salas').doc('SALA_GERAL').set({ tokens: [] });
+      console.log(`✨ Primeira vez! Cofre SALA_GERAL criado com sucesso no Firebase.`);
     }
   } catch (error) {
-    console.log('❌ Erro ao carregar do banco:', error);
+    if (error.code === 5) {
+      console.log('❌ ALERTA FIREBASE: O banco de dados FIRESTORE "vivermais" não foi encontrado ou não existe!');
+    } else {
+      console.log('❌ Erro ao carregar do banco:', error);
+    }
   }
 }
-if (db) carregarTokensDoBanco(); // Aciona na inicialização
+
+if (db) {
+  carregarTokensDoBanco(); // Aciona na inicialização
+}
 
 async function salvarTokenNoBanco(token) {
   if (!db) return; // Aborta se não tiver banco
@@ -65,7 +87,6 @@ app.get('/keepalive', (req, res) => {
 const server = http.createServer(app);
 
 // ⚠️ OTIMIZAÇÃO MAX: Limite de 10MB + Ajustes para evitar que a conexão hiberne
-// Isso é o que garante que o ÁUDIO em Base64 passe sem travar o servidor!
 const io = new Server(server, { 
   cors: { origin: "*" },
   maxHttpBufferSize: 1e7,
@@ -73,14 +94,9 @@ const io = new Server(server, {
   pingTimeout: 60000   
 });
 
-// Salas em memória RAM
-const salasAtivas = {
-  'SALA_GERAL': {
-    senha: null,
-    criador: 'SISTEMA',
-    tokens: []
-  }
-}; 
+// 🛑 LIXEIRO DESATIVADO! 
+// Agora as salas NUNCA mais são apagadas quando os usuários fecham o app. 
+// Os tokens ficarão guardados para receberem os Pushes!
 
 // 👁️ FUNÇÃO: Rastreador de Usuários Online na Sala (Em tempo real)
 function atualizarContagemSala(codigoSala) {
@@ -135,6 +151,7 @@ io.on('connection', (socket) => {
 
   // 1. Criar Sala com Senha
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
+    // Se a sala não existe, cria. Se já existe, não sobreescreve (para não perder os tokens)
     if (!salasAtivas[codigo]) {
       salasAtivas[codigo] = { 
         senha, 
@@ -143,6 +160,7 @@ io.on('connection', (socket) => {
       };
     }
     
+    // Adiciona o token de quem criou, se não estiver lá
     if (tokenPush && !salasAtivas[codigo].tokens.includes(tokenPush)) {
       salasAtivas[codigo].tokens.push(tokenPush);
     }
@@ -162,6 +180,7 @@ io.on('connection', (socket) => {
       socket.data.salaAtual = codigo;
       socket.join(codigo);
       
+      // Guarda o token eternamente na sala
       if (tokenPush && !sala.tokens.includes(tokenPush)) {
         sala.tokens.push(tokenPush);
       }
@@ -185,7 +204,7 @@ io.on('connection', (socket) => {
     
     if (tokenPush && !sala.tokens.includes(tokenPush)) {
       sala.tokens.push(tokenPush);
-      // 🔥 Salva no banco de dados, se ele estiver conectado!
+      // 🔥 Salva no banco de dados para nunca mais esquecer!
       salvarTokenNoBanco(tokenPush);
     }
 
@@ -211,7 +230,7 @@ io.on('connection', (socket) => {
     enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o modo RANKING global. Acesse o app agora!');
   });
 
-  // 5. Enviar Mensagem Fantasma
+  // 5. Enviar Mensagem Fantasma (Texto, Foto ou Áudio)
   socket.on('enviar_fantasma', (dados) => {
     socket.to(dados.sala).emit('receber_fantasma', {
       ...dados,
@@ -220,6 +239,7 @@ io.on('connection', (socket) => {
     });
 
     const sala = salasAtivas[dados.sala];
+    // Se a sala existe e tem tokens salvos, dispara o PUSH!
     if (sala && sala.tokens && sala.tokens.length > 0) {
       const tokensParaAvisar = sala.tokens.filter(t => t !== dados.tokenRemetente);
       enviarNotificacao(tokensParaAvisar, '💬 Novo Recorde!', 'Alguém registrou um novo ranking, acesse agora.');
