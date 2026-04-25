@@ -13,6 +13,9 @@ const salasAtivas = {
   }
 }; 
 
+// 📓 NOVO: Caderninho de Recibos (Evita mensagens duplicadas)
+const controleDeEntregas = {}; 
+
 let ultimoPushEntrada = 0;
 
 // 🛡️ CRIPTOGRAFIA MILITAR: Puxando a chave secreta do painel do Render
@@ -176,7 +179,15 @@ io.on('connection', (socket) => {
   socket.on('entrar_sala_geral', async ({ tokenPush }) => {
     const codigo = 'SALA_GERAL';
     socket.data.salaAtual = codigo;
+    
+    // 👈 NOVO: Memoriza quem é esse socket para o caderninho
+    socket.data.tokenPush = tokenPush; 
     socket.join(codigo);
+    
+    // 👈 NOVO: Cria a folha desse usuário no caderninho se não existir
+    if (tokenPush && !controleDeEntregas[tokenPush]) {
+      controleDeEntregas[tokenPush] = new Set();
+    }
     
     const sala = salasAtivas[codigo];
     
@@ -205,8 +216,12 @@ io.on('connection', (socket) => {
         mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
         
         mensagensRecuperadas.forEach(msg => {
-          if (msg.tokenRemetente !== tokenPush) {
+          // 🛑 A MÁGICA: Só entrega se não for dele E se ainda não estiver no caderninho
+          const jaRecebeu = tokenPush && controleDeEntregas[tokenPush].has(msg.id);
+          
+          if (msg.tokenRemetente !== tokenPush && !jaRecebeu) {
             socket.emit('receber_fantasma', msg);
+            if (tokenPush) controleDeEntregas[tokenPush].add(msg.id); // 👈 Carimba que entregou
           }
         });
       } catch (error) { /* Silenciado */ }
@@ -258,8 +273,20 @@ io.on('connection', (socket) => {
       } catch (error) { /* Silenciado */ }
     }
 
-    // Manda limpo em tempo real para quem já está na sala
-    socket.to(dados.sala).emit('receber_fantasma', mensagemFinal);
+    // 🚚 ENTREGA VIP: Em vez de gritar na sala, entrega individualmente e anota no caderninho
+    const socketsNaSala = await io.in(dados.sala).fetchSockets();
+    socketsNaSala.forEach(soc => {
+      if (soc.id !== socket.id) { // Não entrega de volta pro próprio remetente
+        soc.emit('receber_fantasma', mensagemFinal);
+        
+        // Anota que esse usuário já recebeu a mensagem ao vivo
+        const tokenDestino = soc.data.tokenPush;
+        if (tokenDestino) {
+          if (!controleDeEntregas[tokenDestino]) controleDeEntregas[tokenDestino] = new Set();
+          controleDeEntregas[tokenDestino].add(mensagemFinal.id);
+        }
+      }
+    });
   });
 
   socket.on('sair_sala', () => {
