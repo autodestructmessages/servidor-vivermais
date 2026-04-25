@@ -2,8 +2,9 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const crypto = require('crypto'); // 🛡️ Módulo de segurança nativo do Node
 
-// 1️⃣ Salas em memória RAM (Movida para o topo para o Firebase conseguir salvar os dados nela)
+// 1️⃣ Salas em memória RAM
 const salasAtivas = {
   'SALA_GERAL': {
     senha: null,
@@ -12,8 +13,39 @@ const salasAtivas = {
   }
 }; 
 
-// 🛑 TRAVA ANTI-SPAM (Evita que o celular apite toda hora se a conexão de alguém cair e voltar)
 let ultimoPushEntrada = 0;
+
+// 🛡️ CRIPTOGRAFIA MILITAR: Puxando a chave secreta do painel do Render
+// Se não achar no Render, usa uma de teste (nunca use a de teste em produção oficial)
+const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
+const ENCRYPTION_KEY = crypto.scryptSync(senhaSecreta, 'salt', 32); 
+const IV_LENGTH = 16;
+
+// 🔒 Função para Embaralhar antes de ir pro Firebase
+function encrypt(text) {
+  if (!text) return text;
+  try {
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    return iv.toString('hex') + ':' + encrypted;
+  } catch (e) { return text; }
+}
+
+// 🔓 Função para Desembaralhar quando puxar do Firebase
+function decrypt(text) {
+  if (!text || !text.includes(':')) return text;
+  try {
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift(), 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (e) { return text; } 
+}
 
 // 2️⃣ 🔐 INÍCIO DA BLINDAGEM DO FIREBASE
 const admin = require('firebase-admin');
@@ -22,61 +54,40 @@ const { getFirestore } = require('firebase-admin/firestore');
 let db = null;
 
 try {
-  // Tenta ler o arquivo secreto do Render
   const serviceAccount = require('./firebase-key.json');
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
-  
-  // 👇 Conectando no banco com o nome correto que você criou no painel: 'vivermais'
   db = getFirestore('vivermais'); 
-  
-  console.log('✅ FIREBASE CONECTADO: Cofre ativado com sucesso!');
 } catch (error) {
-  // Se o arquivo não existir ou der erro, o servidor não morre!
   console.log('⚠️ AVISO MODO DE SEGURANÇA: Arquivo firebase-key.json não encontrado ou inválido.');
-  console.log('⚠️ O servidor vai continuar rodando 100%, mas salvando apenas na memória RAM por enquanto.');
 }
 
-// 📦 FUNÇÕES DO COFRE (Só funcionam se o banco conectou)
 async function carregarTokensDoBanco() {
-  if (!db) return; // Aborta se não tiver banco
+  if (!db) return; 
   try {
     const doc = await db.collection('Salas').doc('SALA_GERAL').get();
     if (doc.exists) {
       salasAtivas['SALA_GERAL'].tokens = doc.data().tokens || [];
-      console.log(`📦 BEM-VINDO DE VOLTA! ${salasAtivas['SALA_GERAL'].tokens.length} tokens recuperados do cofre.`);
     } else {
       await db.collection('Salas').doc('SALA_GERAL').set({ tokens: [] });
-      console.log(`✨ Primeira vez! Cofre SALA_GERAL criado com sucesso no Firebase.`);
     }
-  } catch (error) {
-    if (error.code === 5) {
-      console.log('❌ ALERTA FIREBASE: O banco de dados FIRESTORE "vivermais" não foi encontrado ou não existe!');
-    } else {
-      console.log('❌ Erro ao carregar do banco:', error);
-    }
-  }
+  } catch (error) { /* Silenciado no modo furtivo */ }
 }
 
-if (db) {
-  carregarTokensDoBanco(); // Aciona na inicialização
-}
+if (db) carregarTokensDoBanco(); 
 
 async function salvarTokenNoBanco(token) {
-  if (!db) return; // Aborta se não tiver banco
+  if (!db) return; 
   try {
     const salaRef = db.collection('Salas').doc('SALA_GERAL');
     await salaRef.update({
       tokens: admin.firestore.FieldValue.arrayUnion(token)
     });
-    console.log(`💾 Token guardado no cofre do Firestore!`);
-  } catch (error) {
-    console.log('❌ Erro ao salvar token:', error);
-  }
+  } catch (error) { /* Silenciado */ }
 }
 
-// 🧹 O LIXEIRO AUTOMÁTICO (Apaga mensagens com mais de 30 minutos)
+// 🧹 LIXEIRO AUTOMÁTICO (Apaga em 30 min)
 async function lixeiroAutomatico() {
   if (!db) return;
   const meiaHoraAtras = Date.now() - (30 * 60 * 1000);
@@ -90,29 +101,23 @@ async function lixeiroAutomatico() {
     const batch = db.batch();
     snapshot.docs.forEach(doc => batch.delete(doc.ref));
     await batch.commit();
-    console.log(`🧹 LIXEIRO DA SEGURANÇA: ${snapshot.size} mensagens antigas foram varridas da internet para sempre.`);
-  } catch (e) { 
-    console.log('Erro no lixeiro:', e.message); 
-  }
+  } catch (e) { /* Silenciado */ }
 }
 
-// O lixeiro passa a cada 10 minutos varrendo a base
 setInterval(lixeiroAutomatico, 10 * 60 * 1000);
-// 🔐 FIM DA BLINDAGEM DO FIREBASE
 
 const app = express();
 app.use(cors());
 
-// ☕ ROTA DO CAFÉ: Usada por robôs externos para manter o servidor acordado
+// ☕ ROTA DO CAFÉ: O único log permitido (pra você ver o monitor funcionando)
 app.get('/keepalive', (req, res) => {
   const data = new Date().toLocaleTimeString();
-  console.log(`☕ [${data}] Bebendo café para não dormir... Servidor imortal!`);
+  console.log(`☕ [${data}] Bebendo café para não dormir... Monitor ativo!`);
   res.send('Servidor ViverMais 100% Acordado!');
 });
 
 const server = http.createServer(app);
 
-// ⚠️ OTIMIZAÇÃO MAX: Limite de 10MB + Ajustes para evitar que a conexão hiberne
 const io = new Server(server, { 
   cors: { origin: "*" },
   maxHttpBufferSize: 1e7,
@@ -120,97 +125,54 @@ const io = new Server(server, {
   pingTimeout: 60000   
 });
 
-// 👁️ FUNÇÃO: Rastreador de Usuários Online na Sala (Em tempo real)
 function atualizarContagemSala(codigoSala) {
   const room = io.sockets.adapter.rooms.get(codigoSala);
   const qtdOnline = room ? room.size : 0;
   io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
-  return qtdOnline; // Retornando a quantidade para usar na lógica de mensagens
+  return qtdOnline; 
 }
 
-// 🎯 FUNÇÃO PUSH COM PRIORIDADE MAX
-async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou. Venha bater seu recorde!') {
+async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou!') {
   const validTokens = tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken'));
-  
-  if (!validTokens || validTokens.length === 0) {
-    console.log('❌ PUSH CANCELADO: Nenhum token válido recebido.');
-    return;
-  }
+  if (!validTokens || validTokens.length === 0) return;
 
   const mensagensPush = validTokens.map(token => ({
-    to: token,
-    sound: 'default',
-    title: tituloPush,
-    body: corpoPush,
-    priority: 'high', 
-    channelId: 'default',
-    data: { segredo: true }, 
+    to: token, sound: 'default', title: tituloPush, body: corpoPush, priority: 'high', data: { segredo: true }, 
   }));
 
   try {
-    const resposta = await fetch('https://exp.host/--/api/v2/push/send', {
+    await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Accept-encoding': 'gzip, deflate',
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Accept': 'application/json', 'Accept-encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
       body: JSON.stringify(mensagensPush),
     });
-    
-    const resultado = await resposta.json();
-    console.log(`🔔 RELATÓRIO PUSH (Tentativa para ${validTokens.length} aparelho(s)):`, JSON.stringify(resultado));
-  } catch (error) {
-    console.log('❌ Erro Crítico ao enviar push:', error);
-  }
+  } catch (error) { /* Silenciado */ }
 }
 
 io.on('connection', (socket) => {
-  console.log('⚡ Agente Conectado:', socket.id);
+  socket.on('ping_fantasma', () => socket.emit('pong_fantasma'));
 
-  socket.on('ping_fantasma', () => {
-    socket.emit('pong_fantasma');
-  });
-
-  // 1. Criar Sala com Senha
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
-    if (!salasAtivas[codigo]) {
-      salasAtivas[codigo] = { senha, criador: socket.id, tokens: [] };
-    }
-    
-    if (tokenPush && !salasAtivas[codigo].tokens.includes(tokenPush)) {
-      salasAtivas[codigo].tokens.push(tokenPush);
-    }
-    
+    if (!salasAtivas[codigo]) salasAtivas[codigo] = { senha, criador: socket.id, tokens: [] };
+    if (tokenPush && !salasAtivas[codigo].tokens.includes(tokenPush)) salasAtivas[codigo].tokens.push(tokenPush);
     socket.data.salaAtual = codigo;
     socket.join(codigo);
-    
-    console.log(`🔒 Sala [${codigo}] Ativa | Token Salvo para PUSH!`);
     atualizarContagemSala(codigo);
   });
 
-  // 2. Entrar em Sala Existente
   socket.on('entrar_sala_privada', ({ codigo, senha, tokenPush }, callback) => {
     const sala = salasAtivas[codigo];
-    
     if (sala && sala.senha === senha) {
       socket.data.salaAtual = codigo;
       socket.join(codigo);
-      
-      if (tokenPush && !sala.tokens.includes(tokenPush)) {
-        sala.tokens.push(tokenPush);
-      }
-
-      console.log(`👤 Agente entrou na sala: ${codigo}`);
+      if (tokenPush && !sala.tokens.includes(tokenPush)) sala.tokens.push(tokenPush);
       callback({ status: 'ok' });
       atualizarContagemSala(codigo);
     } else {
-      console.log(`❌ Tentativa de acesso falha na sala: ${codigo}`);
-      callback({ status: 'erro', msg: 'Código ou Senha incorretos!' });
+      callback({ status: 'erro', msg: 'Código/Senha incorretos!' });
     }
   });
 
-  // 3. Entrar na SALA_GERAL (A MÁGICA ACONTECE AQUI)
   socket.on('entrar_sala_geral', async ({ tokenPush }) => {
     const codigo = 'SALA_GERAL';
     socket.data.salaAtual = codigo;
@@ -223,108 +185,98 @@ io.on('connection', (socket) => {
       salvarTokenNoBanco(tokenPush);
     }
 
-    console.log(`🌐 Agente acessou a SALA_GERAL`);
     const qtdOnline = atualizarContagemSala(codigo);
 
-    // 🚀 1. BUSCA AS MENSAGENS DOS ÚLTIMOS 30 MINUTOS NO FIREBASE
+    // 🚀 RECUPERA O HISTÓRICO, DESCRIPTOGRAFA E FILTRA
     if (db) {
       try {
         const snapshot = await db.collection('MensagensTemporarias').where('sala', '==', codigo).get();
         const mensagensRecuperadas = [];
         
-        snapshot.forEach(doc => mensagensRecuperadas.push(doc.data()));
-        
-        // Organiza por tempo (as mais velhas primeiro, para ler na ordem certa)
+        snapshot.forEach(doc => {
+          let msg = doc.data();
+          // 🔓 Desembaralha antes de mandar pro celular
+          if (msg.texto) msg.texto = decrypt(msg.texto);
+          if (msg.audio) msg.audio = decrypt(msg.audio);
+          if (msg.imagem) msg.imagem = decrypt(msg.imagem);
+          mensagensRecuperadas.push(msg);
+        });
+
         mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
         
-        // 👇 AQUI ESTÁ A CORREÇÃO DO "FANTASMA DE SI MESMO" 👇
         mensagensRecuperadas.forEach(msg => {
-          // Se o token de quem mandou for diferente do seu token atual, ele entrega.
-          // Se for igual, ele ignora (porque foi você mesmo que enviou).
           if (msg.tokenRemetente !== tokenPush) {
             socket.emit('receber_fantasma', msg);
           }
         });
-      } catch (error) {
-        console.log("Erro ao buscar histórico recente:", error);
-      }
+      } catch (error) { /* Silenciado */ }
     }
 
-    // 🤖 2. MENSAGEM DE SISTEMA SE ESTIVER SOZINHO
     if (qtdOnline === 1) {
       socket.emit('receber_fantasma', {
         id: 'SISTEMA_' + Math.random().toString(36).substring(2, 8),
-        texto: '🛡️ MODO SEGURO: Suas mensagens ficam salvas por 30 minutos aguardando outro agente.',
+        texto: '🛡️ MODO SEGURO: Protocolos ativos. Aguardando conexão...',
         hora: new Date().toLocaleTimeString()
       });
     }
 
-    // 🔔 3. NOTIFICAÇÃO PUSH COM TRAVA DE 2 MINUTOS (FIM DO SPAM)
     if (sala.tokens.length > 1) {
       const agora = Date.now();
-      if (agora - ultimoPushEntrada > 120000) { // 120.000 ms = 2 minutos
+      if (agora - ultimoPushEntrada > 120000) { 
         const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
-        enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém acabou de entrar no app ViverMais. Será que vão bater seu recorde?');
-        ultimoPushEntrada = agora; // Atualiza o relógio da trava
+        enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém entrou no ViverMais.');
+        ultimoPushEntrada = agora; 
       }
     }
   });
 
-  // 4. Disparar Alerta Global
   socket.on('alerta_global_enviar', (msg) => {
-    console.log(`🚨 ALERTA GLOBAL DISPARADO: ${msg}`);
     io.emit('alerta_geral_recebido', msg);
-
     const todosTokens = new Set();
-    Object.values(salasAtivas).forEach(sala => {
-      sala.tokens.forEach(t => todosTokens.add(t));
-    });
-
-    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o modo RANKING global. Acesse o app agora!');
+    Object.values(salasAtivas).forEach(sala => sala.tokens.forEach(t => todosTokens.add(t)));
+    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o RANKING!');
   });
 
-  // 5. Enviar Mensagem Fantasma (Agora com Persistência Automática)
+  // 💾 SALVANDO NO FIREBASE COM CRIPTOGRAFIA
   socket.on('enviar_fantasma', async (dados) => {
     const mensagemFinal = {
       ...dados,
       id: Math.random().toString(36).substring(2, 10), 
       hora: new Date().toLocaleTimeString(),
-      timestamp: Date.now() // Carimbo de tempo vital para o lixeiro funcionar
+      timestamp: Date.now() 
     };
 
-    // 💾 SALVA A MENSAGEM NO FIREBASE (Gaveta criada automaticamente!)
     if (db) {
-      try {
-        await db.collection('MensagensTemporarias').add(mensagemFinal);
-      } catch (error) {
-        console.log("Erro ao salvar mensagem temporária no cofre.");
-      }
+      try { 
+        // 🔒 Criptografa pro Firebase não fofocar
+        const mensagemBlindada = { ...mensagemFinal };
+        if (mensagemBlindada.texto) mensagemBlindada.texto = encrypt(mensagemBlindada.texto);
+        if (mensagemBlindada.audio) mensagemBlindada.audio = encrypt(mensagemBlindada.audio);
+        if (mensagemBlindada.imagem) mensagemBlindada.imagem = encrypt(mensagemBlindada.imagem);
+
+        await db.collection('MensagensTemporarias').add(mensagemBlindada); 
+      } catch (error) { /* Silenciado */ }
     }
 
-    // 🚀 ENVIA PARA QUEM ESTIVER ONLINE NA MESMA HORA (Modo Silencioso, sem Push)
+    // Manda limpo em tempo real para quem já está na sala
     socket.to(dados.sala).emit('receber_fantasma', mensagemFinal);
   });
 
-  // 6. Saída Voluntária
   socket.on('sair_sala', () => {
     const salaAtual = socket.data.salaAtual;
     if (salaAtual) {
       socket.leave(salaAtual);
       socket.data.salaAtual = null;
-      console.log(`🚪 Agente saiu da sala: ${salaAtual}`);
       atualizarContagemSala(salaAtual);
     }
   });
 
-  // 7. Desconexão Abrupta
   socket.on('disconnect', () => {
-    console.log('🚫 Agente Desconectado:', socket.id);
     const salaAtual = socket.data.salaAtual;
-    if (salaAtual) {
-      atualizarContagemSala(salaAtual);
-    }
+    if (salaAtual) atualizarContagemSala(salaAtual);
   });
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`🚀 Servidor Fantasma Blindado rodando na porta ${PORT}`));
+// O único log na porta pra você saber que iniciou sem erros
+server.listen(PORT, () => console.log(`🚀 MODO FURTIVO ATIVO: Operando na porta ${PORT}`));
