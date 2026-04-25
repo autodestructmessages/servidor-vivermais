@@ -237,9 +237,13 @@ io.on('connection', (socket) => {
         // Organiza por tempo (as mais velhas primeiro, para ler na ordem certa)
         mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
         
-        // Entrega as mensagens de volta para o agente que acabou de entrar
+        // 👇 AQUI ESTÁ A CORREÇÃO DO "FANTASMA DE SI MESMO" 👇
         mensagensRecuperadas.forEach(msg => {
-          socket.emit('receber_fantasma', msg);
+          // Se o token de quem mandou for diferente do seu token atual, ele entrega.
+          // Se for igual, ele ignora (porque foi você mesmo que enviou).
+          if (msg.tokenRemetente !== tokenPush) {
+            socket.emit('receber_fantasma', msg);
+          }
         });
       } catch (error) {
         console.log("Erro ao buscar histórico recente:", error);
