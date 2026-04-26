@@ -289,6 +289,57 @@ io.on('connection', (socket) => {
     });
   });
 
+  // =====================================
+  // 🏆 SISTEMA DE RANKING GLOBAL ANÔNIMO
+  // =====================================
+  
+  // Salva novo recorde e avisa todo mundo do novo TOP 3
+  socket.on('novo_recorde_anonimo', async ({ jogo, pontos }) => {
+    if (!db || !jogo || pontos === undefined || pontos === null) return;
+    try {
+      // 1. Guarda os pontos no cofre (Sem nome, sem IP, apenas os pontos)
+      await db.collection(`Ranking_${jogo}`).add({
+        pontos: pontos,
+        timestamp: Date.now()
+      });
+
+      // 2. Busca quem são os 3 melhores de todos os tempos daquele jogo
+      const snapshot = await db.collection(`Ranking_${jogo}`)
+        .orderBy('pontos', 'desc')
+        .limit(3)
+        .get();
+
+      const top3 = [];
+      snapshot.forEach(doc => top3.push(doc.data()));
+
+      // 3. Atualiza os placares ao vivo de quem está com o app aberto
+      io.emit('atualizar_ranking', { [jogo]: top3 });
+      
+    } catch (error) {
+      /* Silenciado no modo furtivo */
+    }
+  });
+
+  // Quando alguém abre a tela de Ranking, o app pede a lista atualizada
+  socket.on('pedir_ranking', async () => {
+    if (!db) return;
+    try {
+      const rankings = { bolhas: [], tetris: [], dino: [], reflexo: [], frenesi: [] };
+      const jogos = ['bolhas', 'tetris', 'dino', 'reflexo', 'frenesi'];
+      
+      // Varre todos os jogos para montar o placar completo
+      for (const j of jogos) {
+        const snap = await db.collection(`Ranking_${j}`).orderBy('pontos', 'desc').limit(3).get();
+        snap.forEach(doc => rankings[j].push(doc.data()));
+      }
+
+      // Devolve para quem pediu
+      socket.emit('atualizar_ranking', rankings);
+    } catch (error) {
+      /* Silenciado */
+    }
+  });
+
   socket.on('sair_sala', () => {
     const salaAtual = socket.data.salaAtual;
     if (salaAtual) {
