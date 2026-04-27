@@ -22,7 +22,7 @@ let ultimoPushMensagem = 0;
 let ultimoPushRanking = 0;
 
 // 🛡️ CRIPTOGRAFIA MILITAR
-const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
+const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporaria2026';
 const ENCRYPTION_KEY = crypto.scryptSync(senhaSecreta, 'salt', 32); 
 const IV_LENGTH = 16;
 
@@ -292,11 +292,11 @@ io.on('connection', (socket) => {
       if (agora - ultimoPushMensagem > 10000) { // 10s cooldown
         const tokensParaAvisar = salaAtual.tokens.filter(t => t !== dados.tokenRemetente);
         if (tokensParaAvisar.length > 0) {
-          let subtitulo = 'Nova mensagem no chat!';
-          if (dados.tipo === 'foto') subtitulo = '📷 Nova foto enviada!';
-          if (dados.tipo === 'audio') subtitulo = '🎙️ Novo áudio enviado!';
+          let subtitulo = 'Nova atualização enviada!';
+          if (dados.tipo === 'foto') subtitulo = '📷 Nova atualização enviada!';
+          if (dados.tipo === 'audio') subtitulo = '🎙️ Nova atualização enviada!';
 
-          enviarNotificacao(tokensParaAvisar, '💬 Alguém falou no ViverMais', subtitulo);
+          enviarNotificacao(tokensParaAvisar, '💬 Alguém registrou-se no ViverMais', subtitulo);
           ultimoPushMensagem = agora;
         }
       }
