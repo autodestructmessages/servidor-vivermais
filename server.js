@@ -13,13 +13,17 @@ const salasAtivas = {
   }
 }; 
 
-// 📓 Caderninho de Recibos (Evita mensagens duplicadas)
+// 📓 Caderninho de Recibos (Evita mensagens duplicadas na entrega ao vivo e do histórico)
 const controleDeEntregas = {}; 
 
-// ⏱️ Controles de tempo para não metralhar notificações (Reduzido para 10s para facilitar testes)
+// ⏱️ Controles de tempo furtivo
 let ultimoPushEntrada = 0;
 let ultimoPushMensagem = 0;
 let ultimoPushRanking = 0;
+
+// Tempos de bloqueio para não gerar suspeita
+const TEMPO_SILENCIO_ENTRADA = 5 * 60 * 1000; // 5 minutos sem avisar que alguém entrou
+const TEMPO_SILENCIO_CHAT = 10 * 60 * 1000;   // 10 minutos de silêncio após a 1ª mensagem (Modo Conversa)
 
 // 🛡️ CRIPTOGRAFIA MILITAR
 const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporaria2026';
@@ -88,12 +92,13 @@ async function salvarTokenNoBanco(token) {
   } catch (error) {}
 }
 
+// 🧹 LIXEIRO AUTOMÁTICO (Evapora as mensagens após 20 minutos)
 async function lixeiroAutomatico() {
   if (!db) return;
-  const meiaHoraAtras = Date.now() - (30 * 60 * 1000);
+  const vinteMinutosAtras = Date.now() - (20 * 60 * 1000); // 20 minutos exatos
   try {
     const snapshot = await db.collection('MensagensTemporarias')
-      .where('timestamp', '<', meiaHoraAtras)
+      .where('timestamp', '<', vinteMinutosAtras)
       .get();
 
     if (snapshot.empty) return;
@@ -108,6 +113,7 @@ setInterval(lixeiroAutomatico, 10 * 60 * 1000);
 const app = express();
 app.use(cors());
 
+// Robo do Uptime para o Render não dormir
 app.get('/keepalive', (req, res) => {
   res.send('Servidor ViverMais 100% Acordado!');
 });
@@ -128,9 +134,8 @@ function atualizarContagemSala(codigoSala) {
   return qtdOnline; 
 }
 
-// 🎯 FUNÇÃO PUSH (Restaurada idêntica ao backup antigo)
+// 🎯 FUNÇÃO PUSH
 async function enviarNotificacao(tokensDestino, titulo, corpo) {
-  // Filtra tokens válidos e tira duplicados para não dar erro
   const validTokens = [...new Set(tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken')))];
   
   if (validTokens.length === 0) return;
@@ -180,7 +185,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 🚪 ENTRADA NA SALA GERAL (Com Push Corrigido)
+  // 🚪 ENTRADA NA SALA GERAL
   socket.on('entrar_sala_geral', async ({ tokenPush }) => {
     const codigo = 'SALA_GERAL';
     socket.data.salaAtual = codigo;
@@ -198,7 +203,7 @@ io.on('connection', (socket) => {
 
     const qtdOnline = atualizarContagemSala(codigo);
 
-    // 🚀 RECUPERA O HISTÓRICO
+    // 🚀 RECUPERA O HISTÓRICO DAS ÚLTIMAS MENSAGENS E ENTREGA SOMENTE 1 VEZ
     if (db) {
       try {
         const snapshot = await db.collection('MensagensTemporarias').where('sala', '==', codigo).get();
@@ -216,6 +221,7 @@ io.on('connection', (socket) => {
         
         mensagensRecuperadas.forEach(msg => {
           const jaRecebeu = tokenPush && controleDeEntregas[tokenPush].has(msg.id);
+          // Não entrega se foi a própria pessoa que mandou e não entrega repetido
           if (msg.tokenRemetente !== tokenPush && !jaRecebeu) {
             socket.emit('receber_fantasma', msg);
             if (tokenPush) controleDeEntregas[tokenPush].add(msg.id); 
@@ -232,14 +238,13 @@ io.on('connection', (socket) => {
       });
     }
 
-    // 🔔 NOTIFICAÇÃO DE NOVO COMPETIDOR (Entrada)
+    // 🔔 NOTIFICAÇÃO GENÉRICA DE ENTRADA (Com trava de 5 minutos)
     if (sala.tokens.length > 0) {
       const agora = Date.now();
-      // Bloqueio de apenas 10 segundos para você conseguir testar com facilidade
-      if (agora - ultimoPushEntrada > 10000) { 
+      if (agora - ultimoPushEntrada > TEMPO_SILENCIO_ENTRADA) { 
         const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
         if (tokensParaAvisar.length > 0) {
-          enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém acabou de entrar no app ViverMais. Será que vão bater seu recorde?');
+          enviarNotificacao(tokensParaAvisar, '🏆 Novidade no Ranking!', 'O ranking global foi movimentado. Confira sua posição no ViverMais!');
           ultimoPushEntrada = agora; 
         }
       }
@@ -253,7 +258,7 @@ io.on('connection', (socket) => {
     enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o RANKING global. Acesse o app agora!');
   });
 
-  // 💬 ENVIO DE MENSAGENS (Texto, Áudio e Foto com Push)
+  // 💬 ENVIO DE MENSAGENS 
   socket.on('enviar_fantasma', async (dados) => {
     const mensagemFinal = {
       ...dados,
@@ -272,7 +277,7 @@ io.on('connection', (socket) => {
       } catch (error) { }
     }
 
-    // Entrega ao vivo
+    // Entrega ao vivo para quem estiver na sala
     const socketsNaSala = await io.in(dados.sala).fetchSockets();
     socketsNaSala.forEach(soc => {
       if (soc.id !== socket.id) { 
@@ -285,18 +290,15 @@ io.on('connection', (socket) => {
       }
     });
 
-    // 🔔 NOTIFICAÇÃO DE NOVA MENSAGEM
+    // 🔔 NOTIFICAÇÃO DISFARÇADA DE NOVA MENSAGEM (Com trava pesada de 10 minutos)
     const salaAtual = salasAtivas[dados.sala];
     if (salaAtual && salaAtual.tokens.length > 0) {
       const agora = Date.now();
-      if (agora - ultimoPushMensagem > 10000) { // 10s cooldown
+      // O silêncio de 10 minutos garante que enquanto estiverem conversando, o celular não vai apitar.
+      if (agora - ultimoPushMensagem > TEMPO_SILENCIO_CHAT) { 
         const tokensParaAvisar = salaAtual.tokens.filter(t => t !== dados.tokenRemetente);
         if (tokensParaAvisar.length > 0) {
-          let subtitulo = 'Nova atualização enviada!';
-          if (dados.tipo === 'foto') subtitulo = '📷 Nova atualização enviada!';
-          if (dados.tipo === 'audio') subtitulo = '🎙️ Nova atualização enviada!';
-
-          enviarNotificacao(tokensParaAvisar, '💬 Alguém registrou-se no ViverMais', subtitulo);
+          enviarNotificacao(tokensParaAvisar, '⚡ Energia Recarregada!', 'Sua vida no ViverMais foi recarregada. Aproveite para treinar sua mente!');
           ultimoPushMensagem = agora;
         }
       }
@@ -304,7 +306,7 @@ io.on('connection', (socket) => {
   });
 
   // =====================================
-  // 🏆 SISTEMA DE RANKING GLOBAL COM PUSH
+  // 🏆 SISTEMA DE RANKING GLOBAL
   // =====================================
   socket.on('novo_recorde_anonimo', async ({ jogo, pontos }) => {
     if (!db || !jogo || pontos === undefined || pontos === null) return;
@@ -318,17 +320,14 @@ io.on('connection', (socket) => {
       const top3 = [];
       snapshot.forEach(doc => top3.push(doc.data()));
 
-      // Atualiza ao vivo pra quem tá com a tela aberta
       io.emit('atualizar_ranking', { [jogo]: top3 });
 
-      // 🔔 NOTIFICAÇÃO DE NOVO RECORDE GLOBAL (O que estava faltando!)
+      // Notificação de Recorde (Também disfarçada / App-related)
       const salaGeral = salasAtivas['SALA_GERAL'];
       if (salaGeral && salaGeral.tokens.length > 0) {
         const agora = Date.now();
-        // Avisa no máximo a cada 30 segundos (evita spam se o jogo for rápido)
         if (agora - ultimoPushRanking > 30000) {
           const nomeJogo = jogo.charAt(0).toUpperCase() + jogo.slice(1);
-          // Manda pra todos os tokens, inclusive o cara que bateu o recorde (dá uma sensação boa)
           enviarNotificacao(salaGeral.tokens, '👑 Novo Recorde Global!', `Alguém acabou de registrar ${pontos} pontos em ${nomeJogo}! Venha tentar bater.`);
           ultimoPushRanking = agora;
         }
