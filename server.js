@@ -92,13 +92,13 @@ async function salvarTokenNoBanco(token) {
   } catch (error) {}
 }
 
-// 🧹 LIXEIRO AUTOMÁTICO (Evapora as mensagens após 20 minutos)
+// 🧹 LIXEIRO AUTOMÁTICO (Evapora as mensagens após 6 horas)
 async function lixeiroAutomatico() {
   if (!db) return;
-  const vinteMinutosAtras = Date.now() - (20 * 60 * 1000); // 20 minutos exatos
+  const seisHorasAtras = Date.now() - (6 * 60 * 60 * 1000); // 6 horas exatas
   try {
     const snapshot = await db.collection('MensagensTemporarias')
-      .where('timestamp', '<', vinteMinutosAtras)
+      .where('timestamp', '<', seisHorasAtras)
       .get();
 
     if (snapshot.empty) return;
