@@ -13,23 +13,18 @@ const salasAtivas = {
   }
 }; 
 
-// 📓 Caderninho de Recibos (Evita mensagens duplicadas na entrega ao vivo e do histórico)
+// 📓 NOVO: Caderninho de Recibos (Evita mensagens duplicadas)
 const controleDeEntregas = {}; 
 
-// ⏱️ Controles de tempo furtivo
 let ultimoPushEntrada = 0;
-let ultimoPushMensagem = 0;
-let ultimoPushRanking = 0;
 
-// Tempos de bloqueio para não gerar suspeita
-const TEMPO_SILENCIO_ENTRADA = 5 * 60 * 1000; // 5 minutos sem avisar que alguém entrou
-const TEMPO_SILENCIO_CHAT = 10 * 60 * 1000;   // 10 minutos de silêncio após a 1ª mensagem (Modo Conversa)
-
-// 🛡️ CRIPTOGRAFIA MILITAR
-const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporaria2026';
+// 🛡️ CRIPTOGRAFIA MILITAR: Puxando a chave secreta do painel do Render
+// Se não achar no Render, usa uma de teste (nunca use a de teste em produção oficial)
+const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
 const ENCRYPTION_KEY = crypto.scryptSync(senhaSecreta, 'salt', 32); 
 const IV_LENGTH = 16;
 
+// 🔒 Função para Embaralhar antes de ir pro Firebase
 function encrypt(text) {
   if (!text) return text;
   try {
@@ -41,6 +36,7 @@ function encrypt(text) {
   } catch (e) { return text; }
 }
 
+// 🔓 Função para Desembaralhar quando puxar do Firebase
 function decrypt(text) {
   if (!text || !text.includes(':')) return text;
   try {
@@ -62,10 +58,12 @@ let db = null;
 
 try {
   const serviceAccount = require('./firebase-key.json');
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
   db = getFirestore('vivermais'); 
 } catch (error) {
-  console.log('⚠️ AVISO: Arquivo firebase-key.json não encontrado ou inválido.');
+  console.log('⚠️ AVISO MODO DE SEGURANÇA: Arquivo firebase-key.json não encontrado ou inválido.');
 }
 
 async function carregarTokensDoBanco() {
@@ -77,7 +75,7 @@ async function carregarTokensDoBanco() {
     } else {
       await db.collection('Salas').doc('SALA_GERAL').set({ tokens: [] });
     }
-  } catch (error) {}
+  } catch (error) { /* Silenciado no modo furtivo */ }
 }
 
 if (db) carregarTokensDoBanco(); 
@@ -89,23 +87,24 @@ async function salvarTokenNoBanco(token) {
     await salaRef.update({
       tokens: admin.firestore.FieldValue.arrayUnion(token)
     });
-  } catch (error) {}
+  } catch (error) { /* Silenciado */ }
 }
 
-// 🧹 LIXEIRO AUTOMÁTICO (Evapora as mensagens após 6 horas)
+// 🧹 LIXEIRO AUTOMÁTICO (Apaga em 6 horas)
 async function lixeiroAutomatico() {
   if (!db) return;
-  const seisHorasAtras = Date.now() - (6 * 60 * 60 * 1000); // 6 horas exatas
+  const seisHorasAtras = Date.now() - (6 * 60 * 60 * 1000);
   try {
     const snapshot = await db.collection('MensagensTemporarias')
       .where('timestamp', '<', seisHorasAtras)
       .get();
 
     if (snapshot.empty) return;
+
     const batch = db.batch();
     snapshot.docs.forEach(doc => batch.delete(doc.ref));
     await batch.commit();
-  } catch (e) {}
+  } catch (e) { /* Silenciado */ }
 }
 
 setInterval(lixeiroAutomatico, 10 * 60 * 1000);
@@ -113,8 +112,10 @@ setInterval(lixeiroAutomatico, 10 * 60 * 1000);
 const app = express();
 app.use(cors());
 
-// Robo do Uptime para o Render não dormir
+// ☕ ROTA DO CAFÉ: O único log permitido (pra você ver o monitor funcionando)
 app.get('/keepalive', (req, res) => {
+  const data = new Date().toLocaleTimeString();
+  console.log(`☕ [${data}] Bebendo café para não dormir... Monitor ativo!`);
   res.send('Servidor ViverMais 100% Acordado!');
 });
 
@@ -134,31 +135,21 @@ function atualizarContagemSala(codigoSala) {
   return qtdOnline; 
 }
 
-// 🎯 FUNÇÃO PUSH
-async function enviarNotificacao(tokensDestino, titulo, corpo) {
-  const validTokens = [...new Set(tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken')))];
-  
-  if (validTokens.length === 0) return;
+async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou!') {
+  const validTokens = tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  if (!validTokens || validTokens.length === 0) return;
 
   const mensagensPush = validTokens.map(token => ({
-    to: token, 
-    sound: 'default', 
-    title: titulo, 
-    body: corpo, 
-    priority: 'high'
+    to: token, sound: 'default', title: tituloPush, body: corpoPush, priority: 'high', data: { segredo: true }, 
   }));
 
   try {
     await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
-      headers: { 
-        'Accept': 'application/json', 
-        'Accept-encoding': 'gzip, deflate', 
-        'Content-Type': 'application/json' 
-      },
+      headers: { 'Accept': 'application/json', 'Accept-encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
       body: JSON.stringify(mensagensPush),
     });
-  } catch (error) { console.log('Erro no Push'); }
+  } catch (error) { /* Silenciado */ }
 }
 
 io.on('connection', (socket) => {
@@ -185,14 +176,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 🚪 ENTRADA NA SALA GERAL
   socket.on('entrar_sala_geral', async ({ tokenPush }) => {
     const codigo = 'SALA_GERAL';
     socket.data.salaAtual = codigo;
+    
+    // 👈 NOVO: Memoriza quem é esse socket para o caderninho
     socket.data.tokenPush = tokenPush; 
     socket.join(codigo);
     
-    if (tokenPush && !controleDeEntregas[tokenPush]) controleDeEntregas[tokenPush] = new Set();
+    // 👈 NOVO: Cria a folha desse usuário no caderninho se não existir
+    if (tokenPush && !controleDeEntregas[tokenPush]) {
+      controleDeEntregas[tokenPush] = new Set();
+    }
     
     const sala = salasAtivas[codigo];
     
@@ -203,7 +198,7 @@ io.on('connection', (socket) => {
 
     const qtdOnline = atualizarContagemSala(codigo);
 
-    // 🚀 RECUPERA O HISTÓRICO DAS ÚLTIMAS MENSAGENS E ENTREGA SOMENTE 1 VEZ
+    // 🚀 RECUPERA O HISTÓRICO, DESCRIPTOGRAFA E FILTRA
     if (db) {
       try {
         const snapshot = await db.collection('MensagensTemporarias').where('sala', '==', codigo).get();
@@ -211,6 +206,7 @@ io.on('connection', (socket) => {
         
         snapshot.forEach(doc => {
           let msg = doc.data();
+          // 🔓 Desembaralha antes de mandar pro celular
           if (msg.texto) msg.texto = decrypt(msg.texto);
           if (msg.audio) msg.audio = decrypt(msg.audio);
           if (msg.imagem) msg.imagem = decrypt(msg.imagem);
@@ -220,14 +216,15 @@ io.on('connection', (socket) => {
         mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
         
         mensagensRecuperadas.forEach(msg => {
+          // 🛑 A MÁGICA: Só entrega se não for dele E se ainda não estiver no caderninho
           const jaRecebeu = tokenPush && controleDeEntregas[tokenPush].has(msg.id);
-          // Não entrega se foi a própria pessoa que mandou e não entrega repetido
+          
           if (msg.tokenRemetente !== tokenPush && !jaRecebeu) {
             socket.emit('receber_fantasma', msg);
-            if (tokenPush) controleDeEntregas[tokenPush].add(msg.id); 
+            if (tokenPush) controleDeEntregas[tokenPush].add(msg.id); // 👈 Carimba que entregou
           }
         });
-      } catch (error) { }
+      } catch (error) { /* Silenciado */ }
     }
 
     if (qtdOnline === 1) {
@@ -238,15 +235,12 @@ io.on('connection', (socket) => {
       });
     }
 
-    // 🔔 NOTIFICAÇÃO GENÉRICA DE ENTRADA (Com trava de 5 minutos)
-    if (sala.tokens.length > 0) {
+    if (sala.tokens.length > 1) {
       const agora = Date.now();
-      if (agora - ultimoPushEntrada > TEMPO_SILENCIO_ENTRADA) { 
+      if (agora - ultimoPushEntrada > 120000) { 
         const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
-        if (tokensParaAvisar.length > 0) {
-          enviarNotificacao(tokensParaAvisar, '🏆 Novidade no Ranking!', 'O ranking global foi movimentado. Confira sua posição no ViverMais!');
-          ultimoPushEntrada = agora; 
-        }
+        enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém entrou no ViverMais.');
+        ultimoPushEntrada = agora; 
       }
     }
   });
@@ -255,10 +249,10 @@ io.on('connection', (socket) => {
     io.emit('alerta_geral_recebido', msg);
     const todosTokens = new Set();
     Object.values(salasAtivas).forEach(sala => sala.tokens.forEach(t => todosTokens.add(t)));
-    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o RANKING global. Acesse o app agora!');
+    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o RANKING!');
   });
 
-  // 💬 ENVIO DE MENSAGENS 
+  // 💾 SALVANDO NO FIREBASE COM CRIPTOGRAFIA
   socket.on('enviar_fantasma', async (dados) => {
     const mensagemFinal = {
       ...dados,
@@ -269,19 +263,23 @@ io.on('connection', (socket) => {
 
     if (db) {
       try { 
+        // 🔒 Criptografa pro Firebase não fofocar
         const mensagemBlindada = { ...mensagemFinal };
         if (mensagemBlindada.texto) mensagemBlindada.texto = encrypt(mensagemBlindada.texto);
         if (mensagemBlindada.audio) mensagemBlindada.audio = encrypt(mensagemBlindada.audio);
         if (mensagemBlindada.imagem) mensagemBlindada.imagem = encrypt(mensagemBlindada.imagem);
+
         await db.collection('MensagensTemporarias').add(mensagemBlindada); 
-      } catch (error) { }
+      } catch (error) { /* Silenciado */ }
     }
 
-    // Entrega ao vivo para quem estiver na sala
+    // 🚚 ENTREGA VIP: Em vez de gritar na sala, entrega individualmente e anota no caderninho
     const socketsNaSala = await io.in(dados.sala).fetchSockets();
     socketsNaSala.forEach(soc => {
-      if (soc.id !== socket.id) { 
+      if (soc.id !== socket.id) { // Não entrega de volta pro próprio remetente
         soc.emit('receber_fantasma', mensagemFinal);
+        
+        // Anota que esse usuário já recebeu a mensagem ao vivo
         const tokenDestino = soc.data.tokenPush;
         if (tokenDestino) {
           if (!controleDeEntregas[tokenDestino]) controleDeEntregas[tokenDestino] = new Set();
@@ -289,64 +287,57 @@ io.on('connection', (socket) => {
         }
       }
     });
-
-    // 🔔 NOTIFICAÇÃO DISFARÇADA DE NOVA MENSAGEM (Com trava pesada de 10 minutos)
-    const salaAtual = salasAtivas[dados.sala];
-    if (salaAtual && salaAtual.tokens.length > 0) {
-      const agora = Date.now();
-      // O silêncio de 10 minutos garante que enquanto estiverem conversando, o celular não vai apitar.
-      if (agora - ultimoPushMensagem > TEMPO_SILENCIO_CHAT) { 
-        const tokensParaAvisar = salaAtual.tokens.filter(t => t !== dados.tokenRemetente);
-        if (tokensParaAvisar.length > 0) {
-          enviarNotificacao(tokensParaAvisar, '⚡ Energia Recarregada!', 'Sua vida no ViverMais foi recarregada. Aproveite para treinar sua mente!');
-          ultimoPushMensagem = agora;
-        }
-      }
-    }
   });
 
   // =====================================
-  // 🏆 SISTEMA DE RANKING GLOBAL
+  // 🏆 SISTEMA DE RANKING GLOBAL ANÔNIMO
   // =====================================
+  
+  // Salva novo recorde e avisa todo mundo do novo TOP 3
   socket.on('novo_recorde_anonimo', async ({ jogo, pontos }) => {
     if (!db || !jogo || pontos === undefined || pontos === null) return;
     try {
+      // 1. Guarda os pontos no cofre (Sem nome, sem IP, apenas os pontos)
       await db.collection(`Ranking_${jogo}`).add({
         pontos: pontos,
         timestamp: Date.now()
       });
 
-      const snapshot = await db.collection(`Ranking_${jogo}`).orderBy('pontos', 'desc').limit(3).get();
+      // 2. Busca quem são os 3 melhores de todos os tempos daquele jogo
+      const snapshot = await db.collection(`Ranking_${jogo}`)
+        .orderBy('pontos', 'desc')
+        .limit(3)
+        .get();
+
       const top3 = [];
       snapshot.forEach(doc => top3.push(doc.data()));
 
+      // 3. Atualiza os placares ao vivo de quem está com o app aberto
       io.emit('atualizar_ranking', { [jogo]: top3 });
-
-      // Notificação de Recorde (Também disfarçada / App-related)
-      const salaGeral = salasAtivas['SALA_GERAL'];
-      if (salaGeral && salaGeral.tokens.length > 0) {
-        const agora = Date.now();
-        if (agora - ultimoPushRanking > 30000) {
-          const nomeJogo = jogo.charAt(0).toUpperCase() + jogo.slice(1);
-          enviarNotificacao(salaGeral.tokens, '👑 Novo Recorde Global!', `Alguém acabou de registrar ${pontos} pontos em ${nomeJogo}! Venha tentar bater.`);
-          ultimoPushRanking = agora;
-        }
-      }
-    } catch (error) { }
+      
+    } catch (error) {
+      /* Silenciado no modo furtivo */
+    }
   });
 
+  // Quando alguém abre a tela de Ranking, o app pede a lista atualizada
   socket.on('pedir_ranking', async () => {
     if (!db) return;
     try {
       const rankings = { bolhas: [], tetris: [], dino: [], reflexo: [], frenesi: [] };
       const jogos = ['bolhas', 'tetris', 'dino', 'reflexo', 'frenesi'];
       
+      // Varre todos os jogos para montar o placar completo
       for (const j of jogos) {
         const snap = await db.collection(`Ranking_${j}`).orderBy('pontos', 'desc').limit(3).get();
         snap.forEach(doc => rankings[j].push(doc.data()));
       }
+
+      // Devolve para quem pediu
       socket.emit('atualizar_ranking', rankings);
-    } catch (error) {}
+    } catch (error) {
+      /* Silenciado */
+    }
   });
 
   socket.on('sair_sala', () => {
@@ -365,4 +356,5 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3001;
+// O único log na porta pra você saber que iniciou sem erros
 server.listen(PORT, () => console.log(`🚀 MODO FURTIVO ATIVO: Operando na porta ${PORT}`));
