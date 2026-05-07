@@ -155,6 +155,26 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
 io.on('connection', (socket) => {
   socket.on('ping_fantasma', () => socket.emit('pong_fantasma'));
 
+  // =====================================
+  // 🔄 SISTEMA DE ATUALIZAÇÃO DO APK (COMENTADO)
+  // =====================================
+  
+  const VERSAO_MINIMA_APP = '1.0.0';
+  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1Coh8rgiAtXIbc4YAAL4QKzJWFjvqE9xQ/view?usp=sharing';
+
+  socket.on('verificar_versao', (versaoApp, callback) => {
+    if (versaoApp !== VERSAO_MINIMA_APP) {
+      callback({ 
+        atualizado: false, 
+        link: LINK_NOVO_APK,
+        mensagem: '🚨 Nova versão do ViverMais disponível! Atualize para continuar usando o app.' 
+      });
+    } else {
+      callback({ atualizado: true });
+    }
+  });
+  
+
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
     if (!salasAtivas[codigo]) salasAtivas[codigo] = { senha, criador: socket.id, tokens: [] };
     if (tokenPush && !salasAtivas[codigo].tokens.includes(tokenPush)) salasAtivas[codigo].tokens.push(tokenPush);
@@ -287,6 +307,26 @@ io.on('connection', (socket) => {
         }
       }
     });
+  });
+
+  // =====================================
+  // 📞 SINALIZAÇÃO WEBRTC (CHAMADAS P2P Furtivas)
+  // O servidor atua apenas como "telefonista" conectando os IPs. 
+  // =====================================
+  socket.on('webrtc_offer', (dados) => {
+    socket.to(dados.sala).emit('webrtc_offer_recebido', { sdp: dados.sdp, remetente: socket.id });
+  });
+
+  socket.on('webrtc_answer', (dados) => {
+    socket.to(dados.sala).emit('webrtc_answer_recebido', { sdp: dados.sdp, remetente: socket.id });
+  });
+
+  socket.on('webrtc_ice_candidate', (dados) => {
+    socket.to(dados.sala).emit('webrtc_ice_candidate_recebido', { candidate: dados.candidate, remetente: socket.id });
+  });
+
+  socket.on('desligar_chamada', (dados) => {
+    socket.to(dados.sala).emit('chamada_encerrada');
   });
 
   // =====================================
