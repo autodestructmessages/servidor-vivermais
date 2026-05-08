@@ -2,399 +2,790 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const crypto = require('crypto'); // 🛡️ Módulo de segurança nativo do Node
-
-// 1️⃣ Salas em memória RAM
-const salasAtivas = {
-  'SALA_GERAL': {
-    senha: null,
-    criador: 'SISTEMA',
-    tokens: []
-  }
-}; 
-
-// 📓 NOVO: Caderninho de Recibos (Evita mensagens duplicadas)
-const controleDeEntregas = {}; 
-
-let ultimoPushEntrada = 0;
-
-// 🛡️ CRIPTOGRAFIA MILITAR: Puxando a chave secreta do painel do Render
-// Se não achar no Render, usa uma de teste (nunca use a de teste em produção oficial)
-const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
-const ENCRYPTION_KEY = crypto.scryptSync(senhaSecreta, 'salt', 32); 
-const IV_LENGTH = 16;
-
-// 🔒 Função para Embaralhar antes de ir pro Firebase
-function encrypt(text) {
-  if (!text) return text;
-  try {
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
-  } catch (e) { return text; }
-}
-
-// 🔓 Função para Desembaralhar quando puxar do Firebase
-function decrypt(text) {
-  if (!text || !text.includes(':')) return text;
-  try {
-    const textParts = text.split(':');
-    const iv = Buffer.from(textParts.shift(), 'hex');
-    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
-    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
-  } catch (e) { return text; } 
-}
-
-// 2️⃣ 🔐 INÍCIO DA BLINDAGEM DO FIREBASE
+const crypto = require('crypto');
 const admin = require('firebase-admin');
 const { getFirestore } = require('firebase-admin/firestore');
+
+// =====================================================
+// 🛡️ CONFIGURAÇÕES GERAIS
+// =====================================================
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  },
+  maxHttpBufferSize: 1e7,
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  transports: ['websocket', 'polling']
+});
+
+// =====================================================
+// 🔐 CRIPTOGRAFIA
+// =====================================================
+
+const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
+const ENCRYPTION_KEY = crypto.scryptSync(senhaSecreta, 'salt', 32);
+const IV_LENGTH = 16;
+
+function encrypt(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  try {
+    const iv = crypto.randomBytes(IV_LENGTH);
+
+    const cipher = crypto.createCipheriv(
+      'aes-256-cbc',
+      ENCRYPTION_KEY,
+      iv
+    );
+
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+
+    return `${iv.toString('hex')}:${encrypted}`;
+  } catch (error) {
+    return text;
+  }
+}
+
+function decrypt(text) {
+  if (!text || typeof text !== 'string') return text;
+  if (!text.includes(':')) return text;
+
+  try {
+    const parts = text.split(':');
+
+    const iv = Buffer.from(parts.shift(), 'hex');
+    const encryptedText = Buffer.from(parts.join(':'), 'hex');
+
+    const decipher = crypto.createDecipheriv(
+      'aes-256-cbc',
+      ENCRYPTION_KEY,
+      iv
+    );
+
+    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+
+    return decrypted;
+  } catch (error) {
+    return text;
+  }
+}
+
+// =====================================================
+// 🔥 FIREBASE
+// =====================================================
 
 let db = null;
 
 try {
   const serviceAccount = require('./firebase-key.json');
+
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
-  db = getFirestore('vivermais'); 
+
+  db = getFirestore('vivermais');
+
+  console.log('🔥 Firebase conectado com sucesso');
 } catch (error) {
-  console.log('⚠️ AVISO MODO DE SEGURANÇA: Arquivo firebase-key.json não encontrado ou inválido.');
+  console.log('⚠️ AVISO MODO DE SEGURANÇA: firebase-key.json não encontrado ou inválido.');
 }
+
+// =====================================================
+// 🧠 MEMÓRIA RAM
+// =====================================================
+
+const salasAtivas = {
+  SALA_GERAL: {
+    senha: null,
+    criador: 'SISTEMA',
+    tokens: []
+  }
+};
+
+const controleDeEntregas = {};
+
+let ultimoPushEntrada = 0;
+
+// =====================================================
+// 🔧 FUNÇÕES AUXILIARES
+// =====================================================
+
+function gerarId() {
+  return crypto.randomBytes(8).toString('hex');
+}
+
+function obterSala(codigo) {
+  return salasAtivas[codigo];
+}
+
+function garantirSala(codigo, senha = null, criador = 'SISTEMA') {
+  if (!salasAtivas[codigo]) {
+    salasAtivas[codigo] = {
+      senha,
+      criador,
+      tokens: []
+    };
+  }
+
+  return salasAtivas[codigo];
+}
+
+function atualizarContagemSala(codigoSala) {
+  const room = io.sockets.adapter.rooms.get(codigoSala);
+
+  const qtdOnline = room ? room.size : 0;
+
+  io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
+
+  return qtdOnline;
+}
+
+function adicionarTokenNaSala(codigoSala, tokenPush) {
+  if (!tokenPush) return;
+
+  const sala = obterSala(codigoSala);
+
+  if (!sala) return;
+
+  if (!sala.tokens.includes(tokenPush)) {
+    sala.tokens.push(tokenPush);
+  }
+}
+
+function garantirControleEntrega(tokenPush) {
+  if (!tokenPush) return;
+
+  if (!controleDeEntregas[tokenPush]) {
+    controleDeEntregas[tokenPush] = new Set();
+  }
+}
+
+// =====================================================
+// ☁️ TOKENS FIREBASE
+// =====================================================
 
 async function carregarTokensDoBanco() {
-  if (!db) return; 
+  if (!db) return;
+
   try {
-    const doc = await db.collection('Salas').doc('SALA_GERAL').get();
+    const doc = await db
+      .collection('Salas')
+      .doc('SALA_GERAL')
+      .get();
+
     if (doc.exists) {
-      salasAtivas['SALA_GERAL'].tokens = doc.data().tokens || [];
+      salasAtivas.SALA_GERAL.tokens = doc.data().tokens || [];
     } else {
-      await db.collection('Salas').doc('SALA_GERAL').set({ tokens: [] });
+      await db.collection('Salas').doc('SALA_GERAL').set({
+        tokens: []
+      });
     }
-  } catch (error) { /* Silenciado no modo furtivo */ }
+  } catch (error) {
+    // Silenciado
+  }
 }
 
-if (db) carregarTokensDoBanco(); 
-
 async function salvarTokenNoBanco(token) {
-  if (!db) return; 
+  if (!db || !token) return;
+
   try {
     const salaRef = db.collection('Salas').doc('SALA_GERAL');
+
     await salaRef.update({
       tokens: admin.firestore.FieldValue.arrayUnion(token)
     });
-  } catch (error) { /* Silenciado */ }
+  } catch (error) {
+    // Silenciado
+  }
 }
 
-// 🧹 LIXEIRO AUTOMÁTICO (Apaga em 6 horas)
+if (db) {
+  carregarTokensDoBanco();
+}
+
+// =====================================================
+// 🧹 LIXEIRO AUTOMÁTICO
+// =====================================================
+
 async function lixeiroAutomatico() {
   if (!db) return;
+
   const seisHorasAtras = Date.now() - (6 * 60 * 60 * 1000);
+
   try {
-    const snapshot = await db.collection('MensagensTemporarias')
+    const snapshot = await db
+      .collection('MensagensTemporarias')
       .where('timestamp', '<', seisHorasAtras)
+      .limit(500) // 👈 CORREÇÃO: Limite adicionado para evitar falha do Firebase
       .get();
 
     if (snapshot.empty) return;
 
     const batch = db.batch();
-    snapshot.docs.forEach(doc => batch.delete(doc.ref));
+
+    snapshot.docs.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
     await batch.commit();
-  } catch (e) { /* Silenciado */ }
+  } catch (error) {
+    // Silenciado
+  }
 }
 
 setInterval(lixeiroAutomatico, 10 * 60 * 1000);
 
-const app = express();
-app.use(cors());
+// =====================================================
+// 📲 PUSH NOTIFICATION
+// =====================================================
 
-// ☕ ROTA DO CAFÉ: O único log permitido (pra você ver o monitor funcionando)
-app.get('/keepalive', (req, res) => {
-  const data = new Date().toLocaleTimeString();
-  console.log(`☕ [${data}] Bebendo café para não dormir... Monitor ativo!`);
-  res.send('Servidor ViverMais 100% Acordado!');
-});
+async function enviarNotificacao(
+  tokensDestino,
+  tituloPush = '⚡ Energia Recarregada!',
+  corpoPush = 'Sua vida no ViverMais recarregou!'
+) {
+  if (!Array.isArray(tokensDestino)) return;
 
-const server = http.createServer(app);
+  const validTokens = tokensDestino.filter(token => {
+    return (
+      token &&
+      typeof token === 'string' &&
+      token.startsWith('ExponentPushToken')
+    );
+  });
 
-const io = new Server(server, { 
-  cors: { origin: "*" },
-  maxHttpBufferSize: 1e7,
-  pingInterval: 25000, 
-  pingTimeout: 60000   
-});
-
-function atualizarContagemSala(codigoSala) {
-  const room = io.sockets.adapter.rooms.get(codigoSala);
-  const qtdOnline = room ? room.size : 0;
-  io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
-  return qtdOnline; 
-}
-
-async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou!') {
-  const validTokens = tokensDestino.filter(t => t && typeof t === 'string' && t.startsWith('ExponentPushToken'));
-  if (!validTokens || validTokens.length === 0) return;
+  if (validTokens.length === 0) return;
 
   const mensagensPush = validTokens.map(token => ({
-    to: token, sound: 'default', title: tituloPush, body: corpoPush, priority: 'high', data: { segredo: true }, 
+    to: token,
+    sound: 'default',
+    title: tituloPush,
+    body: corpoPush,
+    priority: 'high',
+    data: {
+      segredo: true
+    }
   }));
 
   try {
     await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
-      headers: { 'Accept': 'application/json', 'Accept-encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
-      body: JSON.stringify(mensagensPush),
+      headers: {
+        Accept: 'application/json',
+        'Accept-encoding': 'gzip, deflate',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(mensagensPush)
     });
-  } catch (error) { /* Silenciado */ }
+  } catch (error) {
+    // Silenciado
+  }
 }
 
-io.on('connection', (socket) => {
-  socket.on('ping_fantasma', () => socket.emit('pong_fantasma'));
+// =====================================================
+// ☕ KEEPALIVE
+// =====================================================
 
-  // =====================================
-  // 🔄 SISTEMA DE ATUALIZAÇÃO DO APK (COMENTADO)
-  // =====================================
-  
+app.get('/keepalive', (req, res) => {
+  const data = new Date().toLocaleTimeString();
+
+  console.log(`☕ [${data}] Monitor ativo`);
+
+  res.send('Servidor ViverMais 100% Acordado!');
+});
+
+app.get('/', (req, res) => {
+  res.send('🚀 Servidor ViverMais Online');
+});
+
+// =====================================================
+// 🔌 SOCKET.IO
+// =====================================================
+
+io.on('connection', socket => {
+
+  // ==========================================
+  // ❤️ PING
+  // ==========================================
+
+  socket.on('ping_fantasma', () => {
+    socket.emit('pong_fantasma');
+  });
+
+  // ==========================================
+  // 📦 ATUALIZAÇÃO APK
+  // ==========================================
+
   const VERSAO_MINIMA_APP = '1.0.0';
-  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1Coh8rgiAtXIbc4YAAL4QKzJWFjvqE9xQ/view?usp=sharing';
+
+  const LINK_NOVO_APK =
+    'https://drive.google.com/file/d/1Coh8rgiAtXIbc4YAAL4QKzJWFjvqE9xQ/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
+
     if (versaoApp !== VERSAO_MINIMA_APP) {
-      callback({ 
-        atualizado: false, 
+      callback({
+        atualizado: false,
         link: LINK_NOVO_APK,
-        mensagem: '🚨 Nova versão do ViverMais disponível! Atualize para continuar usando o app.' 
+        mensagem: '🚨 Nova versão do ViverMais disponível! Atualize para continuar usando o app.'
       });
     } else {
-      callback({ atualizado: true });
+      callback({
+        atualizado: true
+      });
     }
   });
-  
+
+  // ==========================================
+  // 🏠 CRIAR SALA
+  // ==========================================
 
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
-    if (!salasAtivas[codigo]) salasAtivas[codigo] = { senha, criador: socket.id, tokens: [] };
-    if (tokenPush && !salasAtivas[codigo].tokens.includes(tokenPush)) salasAtivas[codigo].tokens.push(tokenPush);
+
+    if (!codigo) return;
+
+    garantirSala(codigo, senha, socket.id);
+
+    adicionarTokenNaSala(codigo, tokenPush);
+
     socket.data.salaAtual = codigo;
+    socket.data.tokenPush = tokenPush;
+
     socket.join(codigo);
+
     atualizarContagemSala(codigo);
   });
 
+  // ==========================================
+  // 🔐 ENTRAR SALA PRIVADA
+  // ==========================================
+
   socket.on('entrar_sala_privada', ({ codigo, senha, tokenPush }, callback) => {
-    const sala = salasAtivas[codigo];
+
+    const sala = obterSala(codigo);
+
     if (sala && sala.senha === senha) {
+
       socket.data.salaAtual = codigo;
+      socket.data.tokenPush = tokenPush;
+
       socket.join(codigo);
-      if (tokenPush && !sala.tokens.includes(tokenPush)) sala.tokens.push(tokenPush);
-      callback({ status: 'ok' });
+
+      adicionarTokenNaSala(codigo, tokenPush);
+
+      callback({
+        status: 'ok'
+      });
+
       atualizarContagemSala(codigo);
+
     } else {
-      callback({ status: 'erro', msg: 'Código/Senha incorretos!' });
+
+      callback({
+        status: 'erro',
+        msg: 'Código/Senha incorretos!'
+      });
     }
   });
 
+  // ==========================================
+  // 🌎 SALA GERAL
+  // ==========================================
+
   socket.on('entrar_sala_geral', async ({ tokenPush }) => {
+
     const codigo = 'SALA_GERAL';
+
     socket.data.salaAtual = codigo;
-    
-    // 👈 NOVO: Memoriza quem é esse socket para o caderninho
-    socket.data.tokenPush = tokenPush; 
+    socket.data.tokenPush = tokenPush;
+
     socket.join(codigo);
-    
-    // 👈 NOVO: Cria a folha desse usuário no caderninho se não existir
-    if (tokenPush && !controleDeEntregas[tokenPush]) {
-      controleDeEntregas[tokenPush] = new Set();
-    }
-    
-    const sala = salasAtivas[codigo];
-    
+
+    garantirControleEntrega(tokenPush);
+
+    const sala = obterSala(codigo);
+
     if (tokenPush && !sala.tokens.includes(tokenPush)) {
       sala.tokens.push(tokenPush);
-      salvarTokenNoBanco(tokenPush);
+      await salvarTokenNoBanco(tokenPush);
     }
 
     const qtdOnline = atualizarContagemSala(codigo);
 
-    // 🚀 RECUPERA O HISTÓRICO, DESCRIPTOGRAFA E FILTRA
+    // ======================================
+    // 📚 RECUPERAR HISTÓRICO
+    // ======================================
+
     if (db) {
       try {
-        const snapshot = await db.collection('MensagensTemporarias').where('sala', '==', codigo).get();
+
+        const snapshot = await db
+          .collection('MensagensTemporarias')
+          .where('sala', '==', codigo)
+          .get();
+
         const mensagensRecuperadas = [];
-        
+
         snapshot.forEach(doc => {
-          let msg = doc.data();
-          // 🔓 Desembaralha antes de mandar pro celular
+
+          const msg = doc.data();
+
           if (msg.texto) msg.texto = decrypt(msg.texto);
           if (msg.audio) msg.audio = decrypt(msg.audio);
           if (msg.imagem) msg.imagem = decrypt(msg.imagem);
+
           mensagensRecuperadas.push(msg);
         });
 
-        mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
-        
+        mensagensRecuperadas.sort((a, b) => {
+          return a.timestamp - b.timestamp;
+        });
+
         mensagensRecuperadas.forEach(msg => {
-          // 🛑 A MÁGICA: Só entrega se não for dele E se ainda não estiver no caderninho
-          const jaRecebeu = tokenPush && controleDeEntregas[tokenPush].has(msg.id);
-          
-          if (msg.tokenRemetente !== tokenPush && !jaRecebeu) {
+
+          const jaRecebeu =
+            tokenPush &&
+            controleDeEntregas[tokenPush] &&
+            controleDeEntregas[tokenPush].has(msg.id);
+
+          if (
+            msg.tokenRemetente !== tokenPush &&
+            !jaRecebeu
+          ) {
             socket.emit('receber_fantasma', msg);
-            if (tokenPush) controleDeEntregas[tokenPush].add(msg.id); // 👈 Carimba que entregou
+
+            if (tokenPush) {
+              controleDeEntregas[tokenPush].add(msg.id);
+            }
           }
         });
-      } catch (error) { /* Silenciado */ }
+
+      } catch (error) {
+        // Silenciado
+      }
     }
 
+    // ======================================
+    // 🛡️ PRIMEIRO ONLINE
+    // ======================================
+
     if (qtdOnline === 1) {
+
       socket.emit('receber_fantasma', {
-        id: 'SISTEMA_' + Math.random().toString(36).substring(2, 8),
+        id: `SISTEMA_${gerarId()}`,
         texto: '🛡️ MODO SEGURO: Protocolos ativos. Aguardando conexão...',
         hora: new Date().toLocaleTimeString()
       });
     }
 
+    // ======================================
+    // 🔔 PUSH ENTRADA
+    // ======================================
+
     if (sala.tokens.length > 1) {
+
       const agora = Date.now();
-      if (agora - ultimoPushEntrada > 120000) { 
-        const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
-        enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém entrou no ViverMais.');
-        ultimoPushEntrada = agora; 
+
+      if (agora - ultimoPushEntrada > 120000) {
+
+        const tokensParaAvisar = sala.tokens.filter(
+          t => t !== tokenPush
+        );
+
+        enviarNotificacao(
+          tokensParaAvisar,
+          '🏆 Novo Competidor!',
+          'Alguém entrou no ViverMais.'
+        );
+
+        ultimoPushEntrada = agora;
       }
     }
   });
 
-  socket.on('alerta_global_enviar', (msg) => {
+  // ==========================================
+  // 🚨 ALERTA GLOBAL
+  // ==========================================
+
+  socket.on('alerta_global_enviar', msg => {
+
     io.emit('alerta_geral_recebido', msg);
+
     const todosTokens = new Set();
-    Object.values(salasAtivas).forEach(sala => sala.tokens.forEach(t => todosTokens.add(t)));
-    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o RANKING!');
+
+    Object.values(salasAtivas).forEach(sala => {
+      sala.tokens.forEach(token => {
+        todosTokens.add(token);
+      });
+    });
+
+    enviarNotificacao(
+      Array.from(todosTokens),
+      '🚨 ATENÇÃO GLOBAL',
+      'Alguém acionou o RANKING!'
+    );
   });
 
-  // 💾 SALVANDO NO FIREBASE COM CRIPTOGRAFIA
-  socket.on('enviar_fantasma', async (dados) => {
+  // ==========================================
+  // 💬 ENVIAR MENSAGEM
+  // ==========================================
+
+  socket.on('enviar_fantasma', async dados => {
+
+    if (!dados || !dados.sala) return;
+
     const mensagemFinal = {
       ...dados,
-      id: Math.random().toString(36).substring(2, 10), 
+      id: gerarId(),
       hora: new Date().toLocaleTimeString(),
-      timestamp: Date.now() 
+      timestamp: Date.now()
     };
 
-    if (db) {
-      try { 
-        // 🔒 Criptografa pro Firebase não fofocar
-        const mensagemBlindada = { ...mensagemFinal };
-        if (mensagemBlindada.texto) mensagemBlindada.texto = encrypt(mensagemBlindada.texto);
-        if (mensagemBlindada.audio) mensagemBlindada.audio = encrypt(mensagemBlindada.audio);
-        if (mensagemBlindada.imagem) mensagemBlindada.imagem = encrypt(mensagemBlindada.imagem);
+    // ======================================
+    // 🔒 SALVAR CRIPTOGRAFADO
+    // ======================================
 
-        await db.collection('MensagensTemporarias').add(mensagemBlindada); 
-      } catch (error) { /* Silenciado */ }
+    if (db) {
+      try {
+
+        const mensagemBlindada = {
+          ...mensagemFinal
+        };
+
+        if (mensagemBlindada.texto) {
+          mensagemBlindada.texto = encrypt(mensagemBlindada.texto);
+        }
+
+        if (mensagemBlindada.audio) {
+          mensagemBlindada.audio = encrypt(mensagemBlindada.audio);
+        }
+
+        if (mensagemBlindada.imagem) {
+          mensagemBlindada.imagem = encrypt(mensagemBlindada.imagem);
+        }
+
+        await db
+          .collection('MensagensTemporarias')
+          .add(mensagemBlindada);
+
+      } catch (error) {
+        // Silenciado
+      }
     }
 
-    // 🚚 ENTREGA VIP: Em vez de gritar na sala, entrega individualmente e anota no caderninho
-    const socketsNaSala = await io.in(dados.sala).fetchSockets();
-    socketsNaSala.forEach(soc => {
-      if (soc.id !== socket.id) { // Não entrega de volta pro próprio remetente
-        soc.emit('receber_fantasma', mensagemFinal);
-        
-        // Anota que esse usuário já recebeu a mensagem ao vivo
-        const tokenDestino = soc.data.tokenPush;
-        if (tokenDestino) {
-          if (!controleDeEntregas[tokenDestino]) controleDeEntregas[tokenDestino] = new Set();
-          controleDeEntregas[tokenDestino].add(mensagemFinal.id);
+    // ======================================
+    // 🚚 ENTREGA VIP
+    // ======================================
+
+    try {
+
+      const socketsNaSala = await io
+        .in(dados.sala)
+        .fetchSockets();
+
+      socketsNaSala.forEach(soc => {
+
+        if (soc.id !== socket.id) {
+
+          soc.emit('receber_fantasma', mensagemFinal);
+
+          const tokenDestino = soc.data.tokenPush;
+
+          if (tokenDestino) {
+
+            garantirControleEntrega(tokenDestino);
+
+            controleDeEntregas[tokenDestino].add(
+              mensagemFinal.id
+            );
+          }
         }
+      });
+
+    } catch (error) {
+      // Silenciado
+    }
+  });
+
+  // ==========================================
+  // 📞 WEBRTC
+  // ==========================================
+
+  socket.on('webrtc_offer', dados => {
+    socket.to(dados.sala).emit(
+      'webrtc_offer_recebido',
+      {
+        sdp: dados.sdp,
+        remetente: socket.id
       }
-    });
+    );
+
+    // 👈 CORREÇÃO: Disparar notificação disfarçada para acordar o usuário offline
+    const sala = obterSala(dados.sala);
+    if (sala && sala.tokens) {
+      const tokensDestino = sala.tokens.filter(t => t !== socket.data.tokenPush);
+      
+      enviarNotificacao(
+        tokensDestino,
+        '🎮 Desafio ao Vivo!',
+        'Um jogador está te desafiando agora. Entre rápido na partida!'
+      );
+    }
   });
 
-  // =====================================
-  // 📞 SINALIZAÇÃO WEBRTC (CHAMADAS P2P Furtivas)
-  // O servidor atua apenas como "telefonista" conectando os IPs. 
-  // =====================================
-  socket.on('webrtc_offer', (dados) => {
-    socket.to(dados.sala).emit('webrtc_offer_recebido', { sdp: dados.sdp, remetente: socket.id });
+  socket.on('webrtc_answer', dados => {
+    socket.to(dados.sala).emit(
+      'webrtc_answer_recebido',
+      {
+        sdp: dados.sdp,
+        remetente: socket.id
+      }
+    );
   });
 
-  socket.on('webrtc_answer', (dados) => {
-    socket.to(dados.sala).emit('webrtc_answer_recebido', { sdp: dados.sdp, remetente: socket.id });
+  socket.on('webrtc_ice_candidate', dados => {
+    socket.to(dados.sala).emit(
+      'webrtc_ice_candidate_recebido',
+      {
+        candidate: dados.candidate,
+        remetente: socket.id
+      }
+    );
   });
 
-  socket.on('webrtc_ice_candidate', (dados) => {
-    socket.to(dados.sala).emit('webrtc_ice_candidate_recebido', { candidate: dados.candidate, remetente: socket.id });
-  });
-
-  socket.on('desligar_chamada', (dados) => {
+  socket.on('desligar_chamada', dados => {
     socket.to(dados.sala).emit('chamada_encerrada');
   });
 
-  // =====================================
-  // 🏆 SISTEMA DE RANKING GLOBAL ANÔNIMO
-  // =====================================
-  
-  // Salva novo recorde e avisa todo mundo do novo TOP 3
+  // ==========================================
+  // 🏆 RANKING
+  // ==========================================
+
   socket.on('novo_recorde_anonimo', async ({ jogo, pontos }) => {
-    if (!db || !jogo || pontos === undefined || pontos === null) return;
+
+    if (!db) return;
+    if (!jogo) return;
+    if (pontos === undefined || pontos === null) return;
+
     try {
-      // 1. Guarda os pontos no cofre (Sem nome, sem IP, apenas os pontos)
+
       await db.collection(`Ranking_${jogo}`).add({
-        pontos: pontos,
+        pontos,
         timestamp: Date.now()
       });
 
-      // 2. Busca quem são os 3 melhores de todos os tempos daquele jogo
-      const snapshot = await db.collection(`Ranking_${jogo}`)
+      const snapshot = await db
+        .collection(`Ranking_${jogo}`)
         .orderBy('pontos', 'desc')
         .limit(3)
         .get();
 
       const top3 = [];
-      snapshot.forEach(doc => top3.push(doc.data()));
 
-      // 3. Atualiza os placares ao vivo de quem está com o app aberto
-      io.emit('atualizar_ranking', { [jogo]: top3 });
-      
+      snapshot.forEach(doc => {
+        top3.push(doc.data());
+      });
+
+      io.emit('atualizar_ranking', {
+        [jogo]: top3
+      });
+
     } catch (error) {
-      /* Silenciado no modo furtivo */
+      // Silenciado
     }
   });
 
-  // Quando alguém abre a tela de Ranking, o app pede a lista atualizada
   socket.on('pedir_ranking', async () => {
+
     if (!db) return;
+
     try {
-      const rankings = { bolhas: [], tetris: [], dino: [], reflexo: [], frenesi: [] };
-      const jogos = ['bolhas', 'tetris', 'dino', 'reflexo', 'frenesi'];
-      
-      // Varre todos os jogos para montar o placar completo
-      for (const j of jogos) {
-        const snap = await db.collection(`Ranking_${j}`).orderBy('pontos', 'desc').limit(3).get();
-        snap.forEach(doc => rankings[j].push(doc.data()));
+
+      const rankings = {
+        bolhas: [],
+        tetris: [],
+        dino: [],
+        reflexo: [],
+        frenesi: []
+      };
+
+      const jogos = [
+        'bolhas',
+        'tetris',
+        'dino',
+        'reflexo',
+        'frenesi'
+      ];
+
+      for (const jogo of jogos) {
+
+        const snapshot = await db
+          .collection(`Ranking_${jogo}`)
+          .orderBy('pontos', 'desc')
+          .limit(3)
+          .get();
+
+        snapshot.forEach(doc => {
+          rankings[jogo].push(doc.data());
+        });
       }
 
-      // Devolve para quem pediu
       socket.emit('atualizar_ranking', rankings);
+
     } catch (error) {
-      /* Silenciado */
+      // Silenciado
     }
   });
 
+  // ==========================================
+  // 🚪 SAIR DA SALA
+  // ==========================================
+
   socket.on('sair_sala', () => {
+
     const salaAtual = socket.data.salaAtual;
+
     if (salaAtual) {
+
       socket.leave(salaAtual);
+
       socket.data.salaAtual = null;
+
       atualizarContagemSala(salaAtual);
     }
   });
 
+  // ==========================================
+  // ❌ DISCONNECT
+  // ==========================================
+
   socket.on('disconnect', () => {
+
     const salaAtual = socket.data.salaAtual;
-    if (salaAtual) atualizarContagemSala(salaAtual);
+
+    if (salaAtual) {
+      atualizarContagemSala(salaAtual);
+    }
   });
 });
 
+// =====================================================
+// 🚀 START SERVER
+// =====================================================
+
 const PORT = process.env.PORT || 3001;
-// O único log na porta pra você saber que iniciou sem erros
-server.listen(PORT, () => console.log(`🚀 MODO FURTIVO ATIVO: Operando na porta ${PORT}`));
+
+server.listen(PORT, () => {
+  console.log(`🚀 MODO FURTIVO ATIVO: Operando na porta ${PORT}`);
+});
