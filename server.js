@@ -113,8 +113,8 @@ const salasAtivas = {
   }
 };
 
+const salasVaziasTimers = {}; // NOVO: Controle de tempo de destruição de salas
 const controleDeEntregas = {};
-
 let ultimoPushEntrada = 0;
 
 // =====================================================
@@ -137,27 +137,20 @@ function garantirSala(codigo, senha = null, criador = 'SISTEMA') {
       tokens: []
     };
   }
-
   return salasAtivas[codigo];
 }
 
 function atualizarContagemSala(codigoSala) {
   const room = io.sockets.adapter.rooms.get(codigoSala);
-
   const qtdOnline = room ? room.size : 0;
-
   io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
-
   return qtdOnline;
 }
 
 function adicionarTokenNaSala(codigoSala, tokenPush) {
   if (!tokenPush) return;
-
   const sala = obterSala(codigoSala);
-
   if (!sala) return;
-
   if (!sala.tokens.includes(tokenPush)) {
     sala.tokens.push(tokenPush);
   }
@@ -165,9 +158,36 @@ function adicionarTokenNaSala(codigoSala, tokenPush) {
 
 function garantirControleEntrega(tokenPush) {
   if (!tokenPush) return;
-
   if (!controleDeEntregas[tokenPush]) {
     controleDeEntregas[tokenPush] = new Set();
+  }
+}
+
+// --- LÓGICA DE PRESERVAÇÃO DE 5 MINUTOS PARA SALAS PRIVADAS ---
+function verificarDestruicaoSala(codigoSala) {
+  if (!codigoSala || codigoSala === 'SALA_GERAL') return;
+
+  const room = io.sockets.adapter.rooms.get(codigoSala);
+  const qtdOnline = room ? room.size : 0;
+
+  if (qtdOnline === 0) {
+    if (salasVaziasTimers[codigoSala]) return; // Já existe um timer rodando
+    
+    // Inicia um timer de 5 minutos (300.000 ms)
+    salasVaziasTimers[codigoSala] = setTimeout(() => {
+      if (salasAtivas[codigoSala]) {
+        delete salasAtivas[codigoSala];
+        console.log(`🧹 Sala oculta [${codigoSala}] fechada após 5 minutos sem ninguém.`);
+      }
+      delete salasVaziasTimers[codigoSala];
+    }, 300000);
+  }
+}
+
+function cancelarDestruicaoSala(codigoSala) {
+  if (salasVaziasTimers[codigoSala]) {
+    clearTimeout(salasVaziasTimers[codigoSala]);
+    delete salasVaziasTimers[codigoSala];
   }
 }
 
@@ -227,7 +247,6 @@ async function lixeiroAutomatico() {
     const snapshot = await db
       .collection('MensagensTemporarias')
       .where('timestamp', '<', seisHorasAtras)
-      .limit(500) // 👈 CORREÇÃO: Limite adicionado para evitar falha do Firebase
       .get();
 
     if (snapshot.empty) return;
@@ -299,9 +318,7 @@ async function enviarNotificacao(
 
 app.get('/keepalive', (req, res) => {
   const data = new Date().toLocaleTimeString();
-
   console.log(`☕ [${data}] Monitor ativo`);
-
   res.send('Servidor ViverMais 100% Acordado!');
 });
 
@@ -333,7 +350,6 @@ io.on('connection', socket => {
     'https://drive.google.com/file/d/1Coh8rgiAtXIbc4YAAL4QKzJWFjvqE9xQ/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
-
     if (versaoApp !== VERSAO_MINIMA_APP) {
       callback({
         atualizado: false,
@@ -352,18 +368,17 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('criar_sala', ({ codigo, senha, tokenPush }) => {
-
     if (!codigo) return;
 
-    garantirSala(codigo, senha, socket.id);
+    cancelarDestruicaoSala(codigo); // Cancela qualquer timer de destruição caso a sala tenha sido criada recentemente e esvaziada
 
+    garantirSala(codigo, senha, socket.id);
     adicionarTokenNaSala(codigo, tokenPush);
 
     socket.data.salaAtual = codigo;
     socket.data.tokenPush = tokenPush;
 
     socket.join(codigo);
-
     atualizarContagemSala(codigo);
   });
 
@@ -372,16 +387,15 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('entrar_sala_privada', ({ codigo, senha, tokenPush }, callback) => {
-
     const sala = obterSala(codigo);
 
     if (sala && sala.senha === senha) {
+      cancelarDestruicaoSala(codigo); // Alguém entrou, cancela o fechamento da sala!
 
       socket.data.salaAtual = codigo;
       socket.data.tokenPush = tokenPush;
 
       socket.join(codigo);
-
       adicionarTokenNaSala(codigo, tokenPush);
 
       callback({
@@ -391,7 +405,6 @@ io.on('connection', socket => {
       atualizarContagemSala(codigo);
 
     } else {
-
       callback({
         status: 'erro',
         msg: 'Código/Senha incorretos!'
@@ -404,14 +417,12 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('entrar_sala_geral', async ({ tokenPush }) => {
-
     const codigo = 'SALA_GERAL';
 
     socket.data.salaAtual = codigo;
     socket.data.tokenPush = tokenPush;
 
     socket.join(codigo);
-
     garantirControleEntrega(tokenPush);
 
     const sala = obterSala(codigo);
@@ -429,7 +440,6 @@ io.on('connection', socket => {
 
     if (db) {
       try {
-
         const snapshot = await db
           .collection('MensagensTemporarias')
           .where('sala', '==', codigo)
@@ -438,7 +448,6 @@ io.on('connection', socket => {
         const mensagensRecuperadas = [];
 
         snapshot.forEach(doc => {
-
           const msg = doc.data();
 
           if (msg.texto) msg.texto = decrypt(msg.texto);
@@ -453,7 +462,6 @@ io.on('connection', socket => {
         });
 
         mensagensRecuperadas.forEach(msg => {
-
           const jaRecebeu =
             tokenPush &&
             controleDeEntregas[tokenPush] &&
@@ -481,7 +489,6 @@ io.on('connection', socket => {
     // ======================================
 
     if (qtdOnline === 1) {
-
       socket.emit('receber_fantasma', {
         id: `SISTEMA_${gerarId()}`,
         texto: '🛡️ MODO SEGURO: Protocolos ativos. Aguardando conexão...',
@@ -494,11 +501,9 @@ io.on('connection', socket => {
     // ======================================
 
     if (sala.tokens.length > 1) {
-
       const agora = Date.now();
 
       if (agora - ultimoPushEntrada > 120000) {
-
         const tokensParaAvisar = sala.tokens.filter(
           t => t !== tokenPush
         );
@@ -519,7 +524,6 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('alerta_global_enviar', msg => {
-
     io.emit('alerta_geral_recebido', msg);
 
     const todosTokens = new Set();
@@ -542,7 +546,6 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('enviar_fantasma', async dados => {
-
     if (!dados || !dados.sala) return;
 
     const mensagemFinal = {
@@ -558,7 +561,6 @@ io.on('connection', socket => {
 
     if (db) {
       try {
-
         const mensagemBlindada = {
           ...mensagemFinal
         };
@@ -589,21 +591,17 @@ io.on('connection', socket => {
     // ======================================
 
     try {
-
       const socketsNaSala = await io
         .in(dados.sala)
         .fetchSockets();
 
       socketsNaSala.forEach(soc => {
-
         if (soc.id !== socket.id) {
-
           soc.emit('receber_fantasma', mensagemFinal);
 
           const tokenDestino = soc.data.tokenPush;
 
           if (tokenDestino) {
-
             garantirControleEntrega(tokenDestino);
 
             controleDeEntregas[tokenDestino].add(
@@ -619,49 +617,26 @@ io.on('connection', socket => {
   });
 
   // ==========================================
-  // 📞 WEBRTC
+  // 📞 WEBRTC (Nomes Corrigidos!)
   // ==========================================
 
   socket.on('webrtc_offer', dados => {
-    socket.to(dados.sala).emit(
-      'webrtc_offer_recebido',
-      {
-        sdp: dados.sdp,
-        remetente: socket.id
-      }
-    );
-
-    // 👈 CORREÇÃO: Disparar notificação disfarçada para acordar o usuário offline
-    const sala = obterSala(dados.sala);
-    if (sala && sala.tokens) {
-      const tokensDestino = sala.tokens.filter(t => t !== socket.data.tokenPush);
-      
-      enviarNotificacao(
-        tokensDestino,
-        '🎮 Desafio ao Vivo!',
-        'Um jogador está te desafiando agora. Entre rápido na partida!'
-      );
-    }
+    socket.to(dados.sala).emit('chamada_recebida', {
+      offer: dados.offer,
+      tipo: dados.tipo
+    });
   });
 
   socket.on('webrtc_answer', dados => {
-    socket.to(dados.sala).emit(
-      'webrtc_answer_recebido',
-      {
-        sdp: dados.sdp,
-        remetente: socket.id
-      }
-    );
+    socket.to(dados.sala).emit('resposta_chamada', {
+      answer: dados.answer
+    });
   });
 
   socket.on('webrtc_ice_candidate', dados => {
-    socket.to(dados.sala).emit(
-      'webrtc_ice_candidate_recebido',
-      {
-        candidate: dados.candidate,
-        remetente: socket.id
-      }
-    );
+    socket.to(dados.sala).emit('receber_ice_candidate', {
+      candidate: dados.candidate
+    });
   });
 
   socket.on('desligar_chamada', dados => {
@@ -673,13 +648,11 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('novo_recorde_anonimo', async ({ jogo, pontos }) => {
-
     if (!db) return;
     if (!jogo) return;
     if (pontos === undefined || pontos === null) return;
 
     try {
-
       await db.collection(`Ranking_${jogo}`).add({
         pontos,
         timestamp: Date.now()
@@ -707,11 +680,9 @@ io.on('connection', socket => {
   });
 
   socket.on('pedir_ranking', async () => {
-
     if (!db) return;
 
     try {
-
       const rankings = {
         bolhas: [],
         tetris: [],
@@ -729,7 +700,6 @@ io.on('connection', socket => {
       ];
 
       for (const jogo of jogos) {
-
         const snapshot = await db
           .collection(`Ranking_${jogo}`)
           .orderBy('pontos', 'desc')
@@ -753,16 +723,14 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('sair_sala', () => {
-
     const salaAtual = socket.data.salaAtual;
 
     if (salaAtual) {
-
       socket.leave(salaAtual);
-
       socket.data.salaAtual = null;
 
       atualizarContagemSala(salaAtual);
+      verificarDestruicaoSala(salaAtual); // Inicia o relógio de 5 minutos se não sobrou ninguém
     }
   });
 
@@ -771,11 +739,11 @@ io.on('connection', socket => {
   // ==========================================
 
   socket.on('disconnect', () => {
-
     const salaAtual = socket.data.salaAtual;
 
     if (salaAtual) {
       atualizarContagemSala(salaAtual);
+      verificarDestruicaoSala(salaAtual); // Inicia o relógio de 5 minutos se não sobrou ninguém
     }
   });
 });
