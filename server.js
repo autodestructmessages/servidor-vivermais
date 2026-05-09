@@ -344,10 +344,10 @@ io.on('connection', socket => {
   // 📦 ATUALIZAÇÃO APK
   // ==========================================
 
-  const VERSAO_MINIMA_APP = '1.0.0';
+  const VERSAO_MINIMA_APP = '3.0.0';
 
   const LINK_NOVO_APK =
-    'https://drive.google.com/drive/folders/1slyyq4_S8t7aICpVNjEaiEHQ-gCJP5X2?usp=sharing';
+    'https://drive.google.com/file/d/1X_j6sAgVeqXJ9jxr6GutzeGD1WChKqfb/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
