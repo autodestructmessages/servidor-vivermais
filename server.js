@@ -344,7 +344,7 @@ io.on('connection', socket => {
   // 📦 ATUALIZAÇÃO APK
   // ==========================================
 
-  const VERSAO_MINIMA_APP = '2.0.0';
+  const VERSAO_MINIMA_APP = '3.0.0';
 
   const LINK_NOVO_APK =
     'https://drive.google.com/file/d/1bpdMMrrJvY4OKdvSp1mMkqomjcC5igFU/view?usp=sharing';
