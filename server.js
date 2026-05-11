@@ -347,7 +347,7 @@ io.on('connection', socket => {
   const VERSAO_MINIMA_APP = '3.0.0';
 
   const LINK_NOVO_APK =
-    'https://drive.google.com/file/d/1dG-apO7-YI5z2sGzG3AEXMM5aoO7nUYE/view?usp=sharing';
+    'https://drive.google.com/file/d/1CjyE9-hMQHc9oVP2Rp4xOAn0PET8OpFL/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
