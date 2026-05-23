@@ -238,15 +238,17 @@ if (db) {
 // 🧹 LIXEIRO AUTOMÁTICO
 // =====================================================
 
+// --- INÍCIO DA FUNÇÃO lixeiroAutomatico ---
 async function lixeiroAutomatico() {
   if (!db) return;
 
-  const seisHorasAtras = Date.now() - (6 * 60 * 60 * 1000);
+  // CORRIGIDO: Tempo de retenção alterado de 6 para 48 horas
+  const tempoRetencao = Date.now() - (48 * 60 * 60 * 1000);
 
   try {
     const snapshot = await db
       .collection('MensagensTemporarias')
-      .where('timestamp', '<', seisHorasAtras)
+      .where('timestamp', '<', tempoRetencao)
       .get();
 
     if (snapshot.empty) return;
@@ -264,6 +266,7 @@ async function lixeiroAutomatico() {
 }
 
 setInterval(lixeiroAutomatico, 10 * 60 * 1000);
+// --- FINAL DA FUNÇÃO lixeiroAutomatico ---
 
 // =====================================================
 // 📲 PUSH NOTIFICATION
