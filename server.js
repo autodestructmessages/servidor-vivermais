@@ -350,7 +350,7 @@ io.on('connection', socket => {
   const VERSAO_MINIMA_APP = '5.0.0';
 
   const LINK_NOVO_APK =
-    'https://drive.google.com/file/d/1lwdj1fvwRMZnKx1QwO2t1tfYsmIqCDpA/view?usp=sharing';
+    'https://drive.google.com/file/d/1G7AOBamAcP4KmCFzlPVy_bDL691OpWcR/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
