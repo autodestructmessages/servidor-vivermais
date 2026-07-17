@@ -318,6 +318,31 @@ io.on('connection', socket => {
     });
   });
 
+  // 👀 CONFIRMAÇÃO DE LEITURA (NOVO) ==================
+  socket.on('mensagem_lida', async (dados) => {
+    if (!dados || !dados.sala || !dados.id) return;
+
+    // 1. Emite para a sala que a mensagem foi lida (para atualizar a tela do remetente em tempo real)
+    socket.to(dados.sala).emit('mensagem_lida', { id: dados.id });
+
+    // 2. Atualiza no banco de dados (Firebase) para que o status "lida" persista se alguém recarregar a sala
+    if (db) {
+      try {
+        const snapshot = await db.collection('MensagensTemporarias').where('id', '==', dados.id).get();
+        if (!snapshot.empty) {
+          const batch = db.batch();
+          snapshot.docs.forEach(doc => {
+            batch.update(doc.ref, { lida: true });
+          });
+          await batch.commit();
+        }
+      } catch (error) {
+        console.log('Erro ao atualizar status de leitura no banco:', error);
+      }
+    }
+  });
+  // ===================================================
+
   // 🏠 CRIAR SALA
   socket.on('criar_sala', ({ codigo, senha, tokenPush, deviceId }) => {
     if (!codigo) return;
@@ -446,7 +471,8 @@ io.on('connection', socket => {
       ...dados,
       id: gerarId(),
       hora: new Date().toLocaleTimeString(),
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      lida: false // NOVO: Garante que toda nova mensagem nasce como não lida
     };
 
     // 🔒 SALVAR CRIPTOGRAFADO
