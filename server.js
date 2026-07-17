@@ -138,7 +138,6 @@ function adicionarTokenNaSala(codigoSala, tokenPush) {
   }
 }
 
-// CORREÇÃO DO SISTEMA DE ENTREGAS (Usa a Chave: DeviceID ou Token)
 function garantirControleEntrega(chaveIdentificacao) {
   if (!chaveIdentificacao) return;
   if (!controleDeEntregas[chaveIdentificacao]) {
@@ -152,16 +151,18 @@ function verificarDestruicaoSala(codigoSala) {
   const room = io.sockets.adapter.rooms.get(codigoSala);
   const qtdOnline = room ? room.size : 0;
 
+  // CORREÇÃO: Se a sala ficar vazia, o servidor vai segurar ela por 24 HORAS (86400000 ms) 
+  // antes de destruir. Assim a internet pode cair e voltar sem perder a sala/senha.
   if (qtdOnline === 0) {
     if (salasVaziasTimers[codigoSala]) return; 
     
     salasVaziasTimers[codigoSala] = setTimeout(() => {
       if (salasAtivas[codigoSala]) {
         delete salasAtivas[codigoSala];
-        console.log(`🧹 Sala oculta [${codigoSala}] fechada após 5 minutos sem ninguém.`);
+        console.log(`🧹 Sala oculta [${codigoSala}] fechada após 24 horas sem ninguém.`);
       }
       delete salasVaziasTimers[codigoSala];
-    }, 300000);
+    }, 86400000); // 24 horas
   }
 }
 
@@ -203,13 +204,13 @@ if (db) {
 }
 
 // =====================================================
-// 🧹 LIXEIRO AUTOMÁTICO (CORRIGIDO PARA 24 HORAS)
+// 🧹 LIXEIRO AUTOMÁTICO (Mantém 24h rigorosamente)
 // =====================================================
 
 async function lixeiroAutomatico() {
   if (!db) return;
 
-  // CORRIGIDO: Tempo de retenção alterado para 24 horas
+  // Tudo que for mais velho que 24 horas vai para o lixo
   const tempoRetencao = Date.now() - (24 * 60 * 60 * 1000);
 
   try {
@@ -229,6 +230,7 @@ async function lixeiroAutomatico() {
   } catch (error) {}
 }
 
+// O lixeiro passa a cada 10 minutos para verificar se tem algo velho pra deletar
 setInterval(lixeiroAutomatico, 10 * 60 * 1000);
 
 // =====================================================
@@ -291,9 +293,9 @@ io.on('connection', socket => {
     socket.emit('pong_fantasma');
   });
 
-  // 📦 ATUALIZAÇÃO APK
-  const VERSAO_MINIMA_APP = '6.0.0';
-  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1SVUPI1px_cBiwArLir0ncP7ejpNPcUXs/view?usp=sharing';
+  // 📦 ATUALIZAÇÃO APK - ATUALIZADO PARA 7.0.0
+  const VERSAO_MINIMA_APP = '7.0.0';
+  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1EgN5NgoSSrUBBRE3FVBdP8KTN2eMWepS/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
@@ -307,17 +309,16 @@ io.on('connection', socket => {
     }
   });
 
-  // ✍️ DIGITANDO (NOVO EVENTO)
+  // ✍️ DIGITANDO
   socket.on('digitando', (dados) => {
     if (!dados || !dados.sala) return;
-    // Repassa para os outros da sala que este DeviceID está escrevendo
     socket.to(dados.sala).emit('alguem_digitando', {
       isTyping: dados.isTyping,
       deviceId: dados.deviceId
     });
   });
 
-  // 🏠 CRIAR SALA (ACEITANDO DEVICE ID)
+  // 🏠 CRIAR SALA
   socket.on('criar_sala', ({ codigo, senha, tokenPush, deviceId }) => {
     if (!codigo) return;
     cancelarDestruicaoSala(codigo); 
@@ -326,13 +327,13 @@ io.on('connection', socket => {
 
     socket.data.salaAtual = codigo;
     socket.data.tokenPush = tokenPush;
-    socket.data.deviceId = deviceId; // Salva o RG do Celular
+    socket.data.deviceId = deviceId;
 
     socket.join(codigo);
     atualizarContagemSala(codigo);
   });
 
-  // 🔐 ENTRAR SALA PRIVADA (ACEITANDO DEVICE ID)
+  // 🔐 ENTRAR SALA PRIVADA
   socket.on('entrar_sala_privada', ({ codigo, senha, tokenPush, deviceId }, callback) => {
     const sala = obterSala(codigo);
 
@@ -341,7 +342,7 @@ io.on('connection', socket => {
 
       socket.data.salaAtual = codigo;
       socket.data.tokenPush = tokenPush;
-      socket.data.deviceId = deviceId; // Salva o RG do Celular
+      socket.data.deviceId = deviceId;
 
       socket.join(codigo);
       adicionarTokenNaSala(codigo, tokenPush);
@@ -353,17 +354,16 @@ io.on('connection', socket => {
     }
   });
 
-  // 🌎 SALA GERAL (RECUPERAÇÃO INTELIGENTE COM DEVICE ID)
+  // 🌎 SALA GERAL
   socket.on('entrar_sala_geral', async ({ tokenPush, deviceId }) => {
     const codigo = 'SALA_GERAL';
 
     socket.data.salaAtual = codigo;
     socket.data.tokenPush = tokenPush;
-    socket.data.deviceId = deviceId; // Salva o RG do Celular
+    socket.data.deviceId = deviceId;
 
     socket.join(codigo);
     
-    // Agora o servidor acompanha entregas baseado no Device ID (infalível)
     const chaveIdentificacao = deviceId || tokenPush;
     garantirControleEntrega(chaveIdentificacao);
 
@@ -394,11 +394,9 @@ io.on('connection', socket => {
         mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
 
         mensagensRecuperadas.forEach(msg => {
-          // Verifica de forma absoluta se a mensagem já foi entregue pra este aparelho
           const jaRecebeu = chaveIdentificacao && controleDeEntregas[chaveIdentificacao] && controleDeEntregas[chaveIdentificacao].has(msg.id);
           const ehPropria = (msg.deviceId && msg.deviceId === deviceId) || (msg.tokenRemetente && msg.tokenRemetente === tokenPush);
 
-          // Só envia se NÃO for sua própria mensagem e se você AINDA NÃO tiver recebido ela
           if (!ehPropria && !jaRecebeu) {
             socket.emit('receber_fantasma', msg);
             if (chaveIdentificacao) {
@@ -462,7 +460,7 @@ io.on('connection', socket => {
       } catch (error) {}
     }
 
-    // 🚚 ENTREGA VIP E REGISTRO DE RECEBIMENTO
+    // 🚚 ENTREGA VIP
     try {
       const socketsNaSala = await io.in(dados.sala).fetchSockets();
 
@@ -470,7 +468,6 @@ io.on('connection', socket => {
         if (soc.id !== socket.id) {
           soc.emit('receber_fantasma', mensagemFinal);
           
-          // Marca no servidor que ESTE aparelho específico acabou de receber a mensagem
           const chaveDestino = soc.data.deviceId || soc.data.tokenPush;
           if (chaveDestino) {
             garantirControleEntrega(chaveDestino);
