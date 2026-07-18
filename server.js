@@ -295,7 +295,7 @@ io.on('connection', socket => {
 
   // 📦 ATUALIZAÇÃO APK - ATUALIZADO PARA 7.0.0
   const VERSAO_MINIMA_APP = '7.0.0';
-  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1EgN5NgoSSrUBBRE3FVBdP8KTN2eMWepS/view?usp=sharing';
+  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1Ta7bVfltliMGUmHzUc3eS288fF00_F8r/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
