@@ -28,7 +28,7 @@ const io = new Server(server, {
 });
 
 // =====================================================
-// 🔐 CRIPTOGRAFIA
+// 🔐 CRIPTOGRAFIA DE PONTA (CORRIGIDA)
 // =====================================================
 
 const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
@@ -37,7 +37,6 @@ const IV_LENGTH = 16;
 
 function encrypt(text) {
   if (!text || typeof text !== 'string') return text;
-
   try {
     const iv = crypto.randomBytes(IV_LENGTH);
     const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
@@ -52,7 +51,6 @@ function encrypt(text) {
 function decrypt(text) {
   if (!text || typeof text !== 'string') return text;
   if (!text.includes(':')) return text;
-
   try {
     const parts = text.split(':');
     const iv = Buffer.from(parts.shift(), 'hex');
@@ -151,18 +149,17 @@ function verificarDestruicaoSala(codigoSala) {
   const room = io.sockets.adapter.rooms.get(codigoSala);
   const qtdOnline = room ? room.size : 0;
 
-  // CORREÇÃO: Se a sala ficar vazia, o servidor vai segurar ela por 24 HORAS (86400000 ms) 
-  // antes de destruir. Assim a internet pode cair e voltar sem perder a sala/senha.
+  // Atualizado para 48 HORAS (172800000 ms) para acompanhar a retenção de mensagens
   if (qtdOnline === 0) {
     if (salasVaziasTimers[codigoSala]) return; 
     
     salasVaziasTimers[codigoSala] = setTimeout(() => {
       if (salasAtivas[codigoSala]) {
         delete salasAtivas[codigoSala];
-        console.log(`🧹 Sala oculta [${codigoSala}] fechada após 24 horas sem ninguém.`);
+        console.log(`🧹 Sala oculta [${codigoSala}] fechada após 48 horas sem ninguém.`);
       }
       delete salasVaziasTimers[codigoSala];
-    }, 86400000); // 24 horas
+    }, 172800000); // 48 horas
   }
 }
 
@@ -204,14 +201,14 @@ if (db) {
 }
 
 // =====================================================
-// 🧹 LIXEIRO AUTOMÁTICO (Mantém 24h rigorosamente)
+// 🧹 LIXEIRO AUTOMÁTICO (Mantém 48h rigorosamente)
 // =====================================================
 
 async function lixeiroAutomatico() {
   if (!db) return;
 
-  // Tudo que for mais velho que 24 horas vai para o lixo
-  const tempoRetencao = Date.now() - (24 * 60 * 60 * 1000);
+  // AUMENTADO PARA 48 HORAS
+  const tempoRetencao = Date.now() - (48 * 60 * 60 * 1000);
 
   try {
     const snapshot = await db
@@ -318,14 +315,12 @@ io.on('connection', socket => {
     });
   });
 
-  // 👀 CONFIRMAÇÃO DE LEITURA (NOVO) ==================
+  // 👀 CONFIRMAÇÃO DE LEITURA
   socket.on('mensagem_lida', async (dados) => {
     if (!dados || !dados.sala || !dados.id) return;
 
-    // 1. Emite para a sala que a mensagem foi lida (para atualizar a tela do remetente em tempo real)
     socket.to(dados.sala).emit('mensagem_lida', { id: dados.id });
 
-    // 2. Atualiza no banco de dados (Firebase) para que o status "lida" persista se alguém recarregar a sala
     if (db) {
       try {
         const snapshot = await db.collection('MensagensTemporarias').where('id', '==', dados.id).get();
@@ -341,7 +336,6 @@ io.on('connection', socket => {
       }
     }
   });
-  // ===================================================
 
   // 🏠 CRIAR SALA
   socket.on('criar_sala', ({ codigo, senha, tokenPush, deviceId }) => {
@@ -401,7 +395,7 @@ io.on('connection', socket => {
     const qtdOnline = atualizarContagemSala(codigo);
 
     // ======================================
-    // 📚 RECUPERAR HISTÓRICO
+    // 📚 RECUPERAR HISTÓRICO (AGORA BLINDADO PARA 'conteudo')
     // ======================================
     if (db) {
       try {
@@ -410,9 +404,9 @@ io.on('connection', socket => {
 
         snapshot.forEach(doc => {
           const msg = doc.data();
-          if (msg.texto) msg.texto = decrypt(msg.texto);
-          if (msg.audio) msg.audio = decrypt(msg.audio);
-          if (msg.imagem) msg.imagem = decrypt(msg.imagem);
+          // Descriptografando a chave correta vinda do App atualizado
+          if (msg.conteudo) msg.conteudo = decrypt(msg.conteudo);
+          
           mensagensRecuperadas.push(msg);
         });
 
@@ -433,16 +427,15 @@ io.on('connection', socket => {
       } catch (error) {}
     }
 
-    // 🛡️ PRIMEIRO ONLINE
     if (qtdOnline === 1) {
       socket.emit('receber_fantasma', {
         id: `SISTEMA_${gerarId()}`,
-        texto: '🛡️ MODO SEGURO: Protocolos ativos. Aguardando conexão...',
+        conteudo: '🛡️ MODO SEGURO: Protocolos ativos. Aguardando conexão...',
+        tipo: 'texto',
         hora: new Date().toLocaleTimeString()
       });
     }
 
-    // 🔔 PUSH ENTRADA
     if (sala.tokens.length > 1) {
       const agora = Date.now();
       if (agora - ultimoPushEntrada > 120000) {
@@ -472,16 +465,19 @@ io.on('connection', socket => {
       id: gerarId(),
       hora: new Date().toLocaleTimeString(),
       timestamp: Date.now(),
-      lida: false // NOVO: Garante que toda nova mensagem nasce como não lida
+      lida: false
     };
 
-    // 🔒 SALVAR CRIPTOGRAFADO
+    // 🔒 SALVAR CRIPTOGRAFADO (AGORA PROTEGENDO O CAMPO 'conteudo')
     if (db) {
       try {
         const mensagemBlindada = { ...mensagemFinal };
-        if (mensagemBlindada.texto) mensagemBlindada.texto = encrypt(mensagemBlindada.texto);
-        if (mensagemBlindada.audio) mensagemBlindada.audio = encrypt(mensagemBlindada.audio);
-        if (mensagemBlindada.imagem) mensagemBlindada.imagem = encrypt(mensagemBlindada.imagem);
+        
+        // A chave 'conteudo' cobre texto, base64 de áudio e base64 de imagem do seu app
+        if (mensagemBlindada.conteudo) {
+            mensagemBlindada.conteudo = encrypt(mensagemBlindada.conteudo);
+        }
+        
         await db.collection('MensagensTemporarias').add(mensagemBlindada);
       } catch (error) {}
     }
