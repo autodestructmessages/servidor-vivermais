@@ -290,9 +290,9 @@ io.on('connection', socket => {
     socket.emit('pong_fantasma');
   });
 
-  // 📦 ATUALIZAÇÃO APK - ATUALIZADO PARA 8.0.0
+  // 📦 ATUALIZAÇÃO APK - ATUALIZADO PARA 10.0.0
   const VERSAO_MINIMA_APP = '10.0.0';
-  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1nDLvlWCbUCY5sHi2wHOXyEcVWFJ27FUg/view?usp=sharing';
+  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1su4YOraozAAjOD4vSqYsF-Cb3UPVianv/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
