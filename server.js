@@ -291,8 +291,8 @@ io.on('connection', socket => {
   });
 
   // 📦 ATUALIZAÇÃO APK - ATUALIZADO PARA 10.0.0
-  const VERSAO_MINIMA_APP = '10.0.0';
-  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1su4YOraozAAjOD4vSqYsF-Cb3UPVianv/view?usp=sharing';
+  const VERSAO_MINIMA_APP = '11.0.0';
+  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1UqQhYHsgBwm6TU_1OQLigIrtpYH6iN7k/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
