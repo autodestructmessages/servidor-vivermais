@@ -664,7 +664,7 @@ io.on('connection', socket => {
   });
 
   // 📦 ATUALIZAÇÃO APK
-  const VERSAO_MINIMA_APP = '11.0.0';
+  const VERSAO_MINIMA_APP = '12.0.0';
   const LINK_NOVO_APK =
     'https://drive.google.com/file/d/1UqQhYHsgBwm6TU_1OQLigIrtpYH6iN7k/view?usp=sharing';
 
