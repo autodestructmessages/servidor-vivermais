@@ -28,40 +28,192 @@ const io = new Server(server, {
 });
 
 // =====================================================
-// 🔐 CRIPTOGRAFIA DE PONTA (CORRIGIDA)
+// 📡 CONFIGURAÇÃO STUN/TURN PARA CHAMADAS ENTRE REDES
 // =====================================================
 
-const senhaSecreta = process.env.CHAVE_MESTRA || 'ChaveTemporariaLocalViverMais2026';
-const ENCRYPTION_KEY = crypto.scryptSync(senhaSecreta, 'salt', 32);
+// Preferencialmente configure estas variáveis no Render:
+// TURN_URLS=turn:host:3478?transport=udp,turn:host:3478?transport=tcp,turns:host:5349?transport=tcp
+// TURN_USERNAME=usuario_temporario_ou_rotativo
+// TURN_CREDENTIAL=senha_temporaria_ou_rotativa
+//
+// Os valores atuais permanecem como fallback para não interromper o aplicativo
+// durante a migração. As credenciais devem ser rotacionadas no serviço TURN.
+const TURN_URLS = (
+  process.env.TURN_URLS ||
+  [
+    'turn:global.relay.metered.ca:80?transport=udp',
+    'turn:global.relay.metered.ca:80?transport=tcp',
+    'turn:global.relay.metered.ca:443?transport=udp',
+    'turn:global.relay.metered.ca:443?transport=tcp',
+    'turns:global.relay.metered.ca:443?transport=tcp'
+  ].join(',')
+)
+  .split(',')
+  .map(item => item.trim())
+  .filter(Boolean);
+
+const TURN_USERNAME =
+  process.env.TURN_USERNAME ||
+  'f96e9418f324e2d4800a5161';
+
+const TURN_CREDENTIAL =
+  process.env.TURN_CREDENTIAL ||
+  'SwbxK82x3CVSV8dS';
+
+function montarConfiguracaoICE() {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' }
+  ];
+
+  if (
+    TURN_URLS.length > 0 &&
+    TURN_USERNAME &&
+    TURN_CREDENTIAL
+  ) {
+    iceServers.push({
+      urls: TURN_URLS,
+      username: TURN_USERNAME,
+      credential: TURN_CREDENTIAL
+    });
+  }
+
+  return {
+    iceServers,
+    iceCandidatePoolSize: 10
+  };
+}
+
+// =====================================================
+// 🔐 CRIPTOGRAFIA NO SERVIDOR
+// =====================================================
+
+// A chave deve ser definida no painel do Render por CHAVE_MESTRA.
+// O fallback mantém compatibilidade com o ambiente atual, mas deve ser trocado em produção.
+const senhaSecreta =
+  process.env.CHAVE_MESTRA ||
+  'ChaveTemporariaLocalViverMais2026';
+
+// Mantemos o mesmo salt da versão atual para que mensagens já armazenadas
+// durante as últimas 48 horas continuem descriptografáveis após a atualização.
+const ENCRYPTION_KEY = crypto.scryptSync(
+  senhaSecreta,
+  'salt',
+  32
+);
+
 const IV_LENGTH = 16;
 
 function encrypt(text) {
   if (!text || typeof text !== 'string') return text;
+
   try {
     const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+    const cipher = crypto.createCipheriv(
+      'aes-256-cbc',
+      ENCRYPTION_KEY,
+      iv
+    );
+
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
+
     return `${iv.toString('hex')}:${encrypted}`;
   } catch (error) {
-    return text;
+    console.log('[CRIPTOGRAFIA] Falha ao criptografar:', error);
+    throw error;
   }
 }
 
 function decrypt(text) {
   if (!text || typeof text !== 'string') return text;
   if (!text.includes(':')) return text;
+
   try {
     const parts = text.split(':');
     const iv = Buffer.from(parts.shift(), 'hex');
     const encryptedText = Buffer.from(parts.join(':'), 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
-    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+    const decipher = crypto.createDecipheriv(
+      'aes-256-cbc',
+      ENCRYPTION_KEY,
+      iv
+    );
+
+    let decrypted = decipher.update(
+      encryptedText,
+      'hex',
+      'utf8'
+    );
+
     decrypted += decipher.final('utf8');
     return decrypted;
   } catch (error) {
+    console.log('[CRIPTOGRAFIA] Falha ao descriptografar conteúdo antigo:', error.message);
     return text;
   }
+}
+
+// Fotos do app podem chegar como objeto { base64, legenda, mimeType }.
+// Para armazenar tudo criptografado sem quebrar mensagens antigas, o servidor
+// serializa objetos em JSON e registra o formato usado.
+function protegerConteudoParaBanco(conteudo) {
+  if (conteudo === undefined || conteudo === null) {
+    return {
+      conteudoProtegido: conteudo,
+      conteudoFormato: 'nulo'
+    };
+  }
+
+  if (typeof conteudo === 'string') {
+    return {
+      conteudoProtegido: encrypt(conteudo),
+      conteudoFormato: 'string'
+    };
+  }
+
+  return {
+    conteudoProtegido: encrypt(JSON.stringify(conteudo)),
+    conteudoFormato: 'json'
+  };
+}
+
+function restaurarConteudoDoBanco(mensagem) {
+  if (!mensagem || mensagem.conteudo === undefined) {
+    return mensagem;
+  }
+
+  const copia = { ...mensagem };
+
+  if (
+    copia.conteudoFormato === 'json' &&
+    typeof copia.conteudo === 'string'
+  ) {
+    try {
+      copia.conteudo = JSON.parse(decrypt(copia.conteudo));
+      return copia;
+    } catch (error) {
+      console.log('[CRIPTOGRAFIA] JSON de mídia inválido:', error.message);
+      return copia;
+    }
+  }
+
+  if (
+    copia.conteudoFormato === 'string' &&
+    typeof copia.conteudo === 'string'
+  ) {
+    copia.conteudo = decrypt(copia.conteudo);
+    return copia;
+  }
+
+  // Compatibilidade com documentos antigos, que não tinham conteudoFormato.
+  if (typeof copia.conteudo === 'string') {
+    copia.conteudo = decrypt(copia.conteudo);
+  }
+
+  return copia;
 }
 
 // =====================================================
@@ -93,8 +245,10 @@ const salasAtivas = {
   }
 };
 
-const salasVaziasTimers = {}; 
+const salasVaziasTimers = {};
 const controleDeEntregas = {};
+const mensagensProcessadas = new Map();
+const chamadasAtivas = new Map();
 let ultimoPushEntrada = 0;
 
 // =====================================================
@@ -169,6 +323,180 @@ function cancelarDestruicaoSala(codigoSala) {
     delete salasVaziasTimers[codigoSala];
   }
 }
+
+
+function normalizarCodigoSala(codigo) {
+  if (typeof codigo !== 'string') return '';
+  return codigo.trim().replace(/\s+/g, '').toUpperCase().slice(0, 30);
+}
+
+function idMensagemValido(id) {
+  return (
+    typeof id === 'string' &&
+    id.length >= 8 &&
+    id.length <= 160 &&
+    /^[A-Za-z0-9_.:-]+$/.test(id)
+  );
+}
+
+function socketEstaNaSala(socket, codigoSala) {
+  return Boolean(
+    socket &&
+    codigoSala &&
+    socket.rooms &&
+    socket.rooms.has(codigoSala)
+  );
+}
+
+function chaveMensagemProcessada(codigoSala, id) {
+  return `${codigoSala}:${id}`;
+}
+
+function registrarMensagemProcessada(codigoSala, id, metadados = {}) {
+  mensagensProcessadas.set(
+    chaveMensagemProcessada(codigoSala, id),
+    {
+      timestampRegistro: Date.now(),
+      ...metadados
+    }
+  );
+}
+
+function obterMensagemProcessada(codigoSala, id) {
+  return mensagensProcessadas.get(
+    chaveMensagemProcessada(codigoSala, id)
+  );
+}
+
+function obterChaveDispositivo(deviceId, tokenPush) {
+  return deviceId || tokenPush || null;
+}
+
+async function mensagemJaExisteNoBanco(codigoSala, id) {
+  if (!db) return null;
+
+  try {
+    const snapshot = await db
+      .collection('MensagensTemporarias')
+      .where('id', '==', id)
+      .get();
+
+    const documento = snapshot.docs.find(doc => {
+      const dados = doc.data();
+      return dados.sala === codigoSala;
+    });
+
+    if (!documento) return null;
+
+    return restaurarConteudoDoBanco(documento.data());
+  } catch (error) {
+    console.log(
+      `[DEDUPLICAÇÃO] Falha ao procurar ${id} no banco:`,
+      error
+    );
+    return null;
+  }
+}
+
+async function entregarHistoricoDaSala(
+  socket,
+  codigoSala,
+  tokenPush,
+  deviceId
+) {
+  if (!db || !codigoSala) return 0;
+
+  const chaveIdentificacao = obterChaveDispositivo(
+    deviceId,
+    tokenPush
+  );
+
+  garantirControleEntrega(chaveIdentificacao);
+
+  try {
+    const snapshot = await db
+      .collection('MensagensTemporarias')
+      .where('sala', '==', codigoSala)
+      .get();
+
+    const mensagensRecuperadas = [];
+
+    snapshot.forEach(doc => {
+      mensagensRecuperadas.push(
+        restaurarConteudoDoBanco(doc.data())
+      );
+    });
+
+    mensagensRecuperadas.sort(
+      (a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0)
+    );
+
+    let entregues = 0;
+
+    for (const msg of mensagensRecuperadas) {
+      if (!msg?.id) continue;
+
+      const jaRecebeu =
+        chaveIdentificacao &&
+        controleDeEntregas[chaveIdentificacao]?.has(msg.id);
+
+      const ehPropria =
+        (msg.deviceId && msg.deviceId === deviceId) ||
+        (
+          msg.tokenRemetente &&
+          tokenPush &&
+          msg.tokenRemetente === tokenPush
+        );
+
+      if (ehPropria || jaRecebeu) continue;
+
+      const {
+        tokenRemetente,
+        deviceId: deviceIdRemetente,
+        ...mensagemPublica
+      } = msg;
+
+      socket.emit(
+        'receber_fantasma',
+        mensagemPublica
+      );
+
+      // O ID só entra no controle de entregas após o aplicativo responder
+      // confirmar_entrega. Se a conexão cair antes disso, o histórico será reenviado.
+      entregues += 1;
+    }
+
+    console.log(
+      `[HISTÓRICO] ${entregues} mensagem(ns) entregue(s) para socket ${socket.id} na sala ${codigoSala}.`
+    );
+
+    return entregues;
+  } catch (error) {
+    console.log(
+      `[HISTÓRICO] Falha ao recuperar sala ${codigoSala}:`,
+      error
+    );
+    return 0;
+  }
+}
+
+// Limpa somente índices auxiliares em RAM. As mensagens do Firestore continuam
+// obedecendo rigorosamente à retenção de 48 horas já configurada.
+setInterval(() => {
+  const limite = Date.now() - (72 * 60 * 60 * 1000);
+
+  for (const [chave, dados] of mensagensProcessadas.entries()) {
+    if (Number(dados?.timestampRegistro || 0) < limite) {
+      mensagensProcessadas.delete(chave);
+    }
+  }
+
+  for (const [callId, chamada] of chamadasAtivas.entries()) {
+    if (Number(chamada?.criadaEm || 0) < Date.now() - (2 * 60 * 60 * 1000)) {
+      chamadasAtivas.delete(callId);
+    }
+  }
+}, 10 * 60 * 1000);
 
 // =====================================================
 // ☁️ TOKENS FIREBASE
@@ -284,267 +612,1038 @@ app.get('/', (req, res) => {
 // =====================================================
 
 io.on('connection', socket => {
+  console.log(`[SOCKET] Conexão anônima aberta: ${socket.id}`);
+
+  const responder = (callback, payload) => {
+    if (typeof callback === 'function') {
+      callback(payload);
+    }
+  };
+
+  const obterChamadaDoSocket = callId => {
+    if (!callId) return null;
+    return chamadasAtivas.get(callId) || null;
+  };
+
+  const obterOutroParticipante = (chamada, socketIdAtual) => {
+    if (!chamada) return null;
+    if (chamada.chamador === socketIdAtual) return chamada.receptor;
+    if (chamada.receptor === socketIdAtual) return chamada.chamador;
+    return null;
+  };
+
+  const encerrarChamadasDoSocket = motivo => {
+    for (const [callId, chamada] of chamadasAtivas.entries()) {
+      if (
+        chamada.chamador !== socket.id &&
+        chamada.receptor !== socket.id
+      ) {
+        continue;
+      }
+
+      const outroSocketId = obterOutroParticipante(
+        chamada,
+        socket.id
+      );
+
+      if (outroSocketId) {
+        io.to(outroSocketId).emit('chamada_encerrada', {
+          callId,
+          motivo
+        });
+      }
+
+      chamadasAtivas.delete(callId);
+      console.log(`[WEBRTC] Chamada ${callId} removida: ${motivo}`);
+    }
+  };
 
   // ❤️ PING
   socket.on('ping_fantasma', () => {
     socket.emit('pong_fantasma');
   });
 
-  // 📦 ATUALIZAÇÃO APK - ATUALIZADO PARA 10.0.0
+  // 📦 ATUALIZAÇÃO APK
   const VERSAO_MINIMA_APP = '11.0.0';
-  const LINK_NOVO_APK = 'https://drive.google.com/file/d/1UqQhYHsgBwm6TU_1OQLigIrtpYH6iN7k/view?usp=sharing';
+  const LINK_NOVO_APK =
+    'https://drive.google.com/file/d/1UqQhYHsgBwm6TU_1OQLigIrtpYH6iN7k/view?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
-      callback({
+      responder(callback, {
         atualizado: false,
         link: LINK_NOVO_APK,
-        mensagem: '🚨 Nova versão do ViverMais disponível! Atualize para continuar usando o app.'
+        mensagem:
+          '🚨 Nova versão do ViverMais disponível! Atualize para continuar usando o app.'
       });
-    } else {
-      callback({ atualizado: true });
+      return;
     }
+
+    responder(callback, { atualizado: true });
+  });
+
+  // 📡 CONFIGURAÇÃO ICE
+  socket.on('obter_config_ice', callback => {
+    const configuracao = montarConfiguracaoICE();
+
+    console.log(
+      `[WEBRTC] Configuração ICE fornecida para ${socket.id}: ${configuracao.iceServers.length} grupo(s).`
+    );
+
+    responder(callback, configuracao);
   });
 
   // ✍️ DIGITANDO
-  socket.on('digitando', (dados) => {
-    if (!dados || !dados.sala) return;
-    socket.to(dados.sala).emit('alguem_digitando', {
-      isTyping: dados.isTyping,
-      deviceId: dados.deviceId
+  socket.on('digitando', dados => {
+    if (!dados?.sala) return;
+
+    const codigoSala = normalizarCodigoSala(dados.sala);
+
+    if (!socketEstaNaSala(socket, codigoSala)) {
+      console.log(
+        `[DIGITANDO] Evento rejeitado: ${socket.id} não pertence à sala ${codigoSala}.`
+      );
+      return;
+    }
+
+    socket.to(codigoSala).emit('alguem_digitando', {
+      isTyping: Boolean(dados.isTyping),
+      deviceId: socket.data.deviceId || dados.deviceId || null
     });
   });
 
-  // 👀 CONFIRMAÇÃO DE LEITURA
-  socket.on('mensagem_lida', async (dados) => {
-    if (!dados || !dados.sala || !dados.id) return;
+  // 👀 CONFIRMAÇÃO REAL DE LEITURA
+  socket.on('mensagem_lida', async (dados, callback) => {
+    if (!dados?.sala || !dados?.id) {
+      responder(callback, {
+        status: 'erro',
+        msg: 'Dados de leitura incompletos.'
+      });
+      return;
+    }
 
-    socket.to(dados.sala).emit('mensagem_lida', { id: dados.id });
+    const codigoSala = normalizarCodigoSala(dados.sala);
+
+    if (!socketEstaNaSala(socket, codigoSala)) {
+      responder(callback, {
+        status: 'erro',
+        msg: 'Socket não pertence à sala informada.'
+      });
+      return;
+    }
+
+    const lidaEm = Date.now();
+
+    socket.to(codigoSala).emit('mensagem_lida', {
+      id: dados.id,
+      lida: true,
+      lidaEm
+    });
 
     if (db) {
       try {
-        const snapshot = await db.collection('MensagensTemporarias').where('id', '==', dados.id).get();
-        if (!snapshot.empty) {
+        const snapshot = await db
+          .collection('MensagensTemporarias')
+          .where('id', '==', dados.id)
+          .get();
+
+        const documentosDaSala = snapshot.docs.filter(doc => {
+          return doc.data().sala === codigoSala;
+        });
+
+        if (documentosDaSala.length > 0) {
           const batch = db.batch();
-          snapshot.docs.forEach(doc => {
-            batch.update(doc.ref, { lida: true });
+
+          documentosDaSala.forEach(doc => {
+            batch.update(doc.ref, {
+              lida: true,
+              lidaEm
+            });
           });
+
           await batch.commit();
         }
+
+        console.log(
+          `[LEITURA] Mensagem ${dados.id} marcada como lida na sala ${codigoSala}.`
+        );
       } catch (error) {
-        console.log('Erro ao atualizar status de leitura no banco:', error);
+        console.log(
+          '[LEITURA] Erro ao atualizar status no banco:',
+          error
+        );
       }
     }
+
+    responder(callback, {
+      status: 'ok',
+      id: dados.id,
+      lidaEm
+    });
   });
 
-  // 🏠 CRIAR SALA
-  socket.on('criar_sala', ({ codigo, senha, tokenPush, deviceId }) => {
-    if (!codigo) return;
-    cancelarDestruicaoSala(codigo); 
-    garantirSala(codigo, senha, socket.id);
-    adicionarTokenNaSala(codigo, tokenPush);
+  // Sincroniza confirmações que aconteceram enquanto o remetente estava offline.
+  socket.on(
+    'sincronizar_status_leitura',
+    async (dados, callback) => {
+      if (
+        !dados?.sala ||
+        !Array.isArray(dados.ids)
+      ) {
+        responder(callback, {
+          status: 'erro',
+          mensagens: []
+        });
+        return;
+      }
 
-    socket.data.salaAtual = codigo;
-    socket.data.tokenPush = tokenPush;
-    socket.data.deviceId = deviceId;
+      const codigoSala = normalizarCodigoSala(dados.sala);
 
-    socket.join(codigo);
-    atualizarContagemSala(codigo);
-  });
+      if (!socketEstaNaSala(socket, codigoSala)) {
+        responder(callback, {
+          status: 'erro',
+          mensagens: []
+        });
+        return;
+      }
 
-  // 🔐 ENTRAR SALA PRIVADA
-  socket.on('entrar_sala_privada', ({ codigo, senha, tokenPush, deviceId }, callback) => {
-    const sala = obterSala(codigo);
+      const idsSolicitados = new Set(
+        dados.ids
+          .filter(id => typeof id === 'string')
+          .slice(0, 100)
+      );
 
-    if (sala && sala.senha === senha) {
-      cancelarDestruicaoSala(codigo); 
+      if (!db || idsSolicitados.size === 0) {
+        responder(callback, {
+          status: 'ok',
+          mensagens: []
+        });
+        return;
+      }
 
-      socket.data.salaAtual = codigo;
-      socket.data.tokenPush = tokenPush;
-      socket.data.deviceId = deviceId;
-
-      socket.join(codigo);
-      adicionarTokenNaSala(codigo, tokenPush);
-
-      callback({ status: 'ok' });
-      atualizarContagemSala(codigo);
-    } else {
-      callback({ status: 'erro', msg: 'Código/Senha incorretos!' });
-    }
-  });
-
-  // 🌎 SALA GERAL
-  socket.on('entrar_sala_geral', async ({ tokenPush, deviceId }) => {
-    const codigo = 'SALA_GERAL';
-
-    socket.data.salaAtual = codigo;
-    socket.data.tokenPush = tokenPush;
-    socket.data.deviceId = deviceId;
-
-    socket.join(codigo);
-    
-    const chaveIdentificacao = deviceId || tokenPush;
-    garantirControleEntrega(chaveIdentificacao);
-
-    const sala = obterSala(codigo);
-    if (tokenPush && !sala.tokens.includes(tokenPush)) {
-      sala.tokens.push(tokenPush);
-      await salvarTokenNoBanco(tokenPush);
-    }
-
-    const qtdOnline = atualizarContagemSala(codigo);
-
-    // ======================================
-    // 📚 RECUPERAR HISTÓRICO (AGORA BLINDADO PARA 'conteudo')
-    // ======================================
-    if (db) {
       try {
-        const snapshot = await db.collection('MensagensTemporarias').where('sala', '==', codigo).get();
-        const mensagensRecuperadas = [];
+        const snapshot = await db
+          .collection('MensagensTemporarias')
+          .where('sala', '==', codigoSala)
+          .get();
+
+        const mensagens = [];
 
         snapshot.forEach(doc => {
           const msg = doc.data();
-          // Descriptografando a chave correta vinda do App atualizado
-          if (msg.conteudo) msg.conteudo = decrypt(msg.conteudo);
-          
-          mensagensRecuperadas.push(msg);
-        });
 
-        mensagensRecuperadas.sort((a, b) => a.timestamp - b.timestamp);
-
-        mensagensRecuperadas.forEach(msg => {
-          const jaRecebeu = chaveIdentificacao && controleDeEntregas[chaveIdentificacao] && controleDeEntregas[chaveIdentificacao].has(msg.id);
-          const ehPropria = (msg.deviceId && msg.deviceId === deviceId) || (msg.tokenRemetente && msg.tokenRemetente === tokenPush);
-
-          if (!ehPropria && !jaRecebeu) {
-            socket.emit('receber_fantasma', msg);
-            if (chaveIdentificacao) {
-              controleDeEntregas[chaveIdentificacao].add(msg.id);
-            }
+          if (idsSolicitados.has(msg.id)) {
+            mensagens.push({
+              id: msg.id,
+              lida: Boolean(msg.lida),
+              lidaEm: msg.lidaEm || null
+            });
           }
         });
 
-      } catch (error) {}
-    }
+        responder(callback, {
+          status: 'ok',
+          mensagens
+        });
+      } catch (error) {
+        console.log(
+          '[LEITURA] Falha na sincronização:',
+          error
+        );
 
-    if (qtdOnline === 1) {
-      socket.emit('receber_fantasma', {
-        id: `SISTEMA_${gerarId()}`,
-        conteudo: '🛡️ MODO SEGURO: Protocolos ativos. Aguardando conexão...',
-        tipo: 'texto',
-        hora: new Date().toLocaleTimeString()
-      });
-    }
-
-    if (sala.tokens.length > 1) {
-      const agora = Date.now();
-      if (agora - ultimoPushEntrada > 120000) {
-        const tokensParaAvisar = sala.tokens.filter(t => t !== tokenPush);
-        enviarNotificacao(tokensParaAvisar, '🏆 Novo Competidor!', 'Alguém entrou no ViverMais.');
-        ultimoPushEntrada = agora;
+        responder(callback, {
+          status: 'erro',
+          mensagens: []
+        });
       }
     }
+  );
+
+  // 🏠 CRIAR SALA
+  socket.on(
+    'criar_sala',
+    async (
+      {
+        codigo,
+        senha,
+        tokenPush,
+        deviceId
+      } = {},
+      callback
+    ) => {
+      const codigoNormalizado = normalizarCodigoSala(codigo);
+
+      if (!codigoNormalizado || !senha) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Código e senha são obrigatórios.'
+        });
+        return;
+      }
+
+      if (salasAtivas[codigoNormalizado]) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Já existe uma sala ativa com esse código.'
+        });
+        return;
+      }
+
+      cancelarDestruicaoSala(codigoNormalizado);
+      garantirSala(
+        codigoNormalizado,
+        senha,
+        socket.id
+      );
+
+      adicionarTokenNaSala(
+        codigoNormalizado,
+        tokenPush
+      );
+
+      socket.data.salaAtual = codigoNormalizado;
+      socket.data.tokenPush = tokenPush || null;
+      socket.data.deviceId = deviceId || null;
+
+      await socket.join(codigoNormalizado);
+      atualizarContagemSala(codigoNormalizado);
+
+      console.log(
+        `[SALA] Sala privada ${codigoNormalizado} criada por socket anônimo.`
+      );
+
+      responder(callback, {
+        status: 'ok',
+        codigo: codigoNormalizado
+      });
+    }
+  );
+
+  // 🔐 ENTRAR SALA PRIVADA
+  socket.on(
+    'entrar_sala_privada',
+    async (
+      {
+        codigo,
+        senha,
+        tokenPush,
+        deviceId
+      } = {},
+      callback
+    ) => {
+      const codigoNormalizado = normalizarCodigoSala(codigo);
+      const sala = obterSala(codigoNormalizado);
+
+      if (!sala || sala.senha !== senha) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Código/Senha incorretos!'
+        });
+        return;
+      }
+
+      cancelarDestruicaoSala(codigoNormalizado);
+
+      socket.data.salaAtual = codigoNormalizado;
+      socket.data.tokenPush = tokenPush || null;
+      socket.data.deviceId = deviceId || null;
+
+      await socket.join(codigoNormalizado);
+      adicionarTokenNaSala(
+        codigoNormalizado,
+        tokenPush
+      );
+
+      atualizarContagemSala(codigoNormalizado);
+
+      responder(callback, {
+        status: 'ok',
+        codigo: codigoNormalizado
+      });
+
+      await entregarHistoricoDaSala(
+        socket,
+        codigoNormalizado,
+        tokenPush,
+        deviceId
+      );
+
+      console.log(
+        `[SALA] Socket ${socket.id} entrou na sala privada ${codigoNormalizado}.`
+      );
+    }
+  );
+
+  // 🌎 SALA GERAL
+  socket.on(
+    'entrar_sala_geral',
+    async (
+      {
+        tokenPush,
+        deviceId
+      } = {},
+      callback
+    ) => {
+      const codigo = 'SALA_GERAL';
+
+      socket.data.salaAtual = codigo;
+      socket.data.tokenPush = tokenPush || null;
+      socket.data.deviceId = deviceId || null;
+
+      await socket.join(codigo);
+
+      const chaveIdentificacao = obterChaveDispositivo(
+        deviceId,
+        tokenPush
+      );
+
+      garantirControleEntrega(chaveIdentificacao);
+
+      const sala = obterSala(codigo);
+
+      if (
+        tokenPush &&
+        !sala.tokens.includes(tokenPush)
+      ) {
+        sala.tokens.push(tokenPush);
+        await salvarTokenNoBanco(tokenPush);
+      }
+
+      const qtdOnline = atualizarContagemSala(codigo);
+
+      responder(callback, {
+        status: 'ok',
+        codigo,
+        qtdOnline
+      });
+
+      await entregarHistoricoDaSala(
+        socket,
+        codigo,
+        tokenPush,
+        deviceId
+      );
+
+      // A antiga mensagem "MODO SEGURO..." foi removida.
+      // A ausência de outra pessoa é indicada somente pela contagem online.
+
+      if (sala.tokens.length > 1) {
+        const agora = Date.now();
+
+        if (agora - ultimoPushEntrada > 120000) {
+          const tokensParaAvisar = sala.tokens.filter(
+            token => token !== tokenPush
+          );
+
+          enviarNotificacao(
+            tokensParaAvisar,
+            '🏆 Novo Competidor!',
+            'Alguém entrou no ViverMais.'
+          );
+
+          ultimoPushEntrada = agora;
+        }
+      }
+
+      console.log(
+        `[SALA] Socket ${socket.id} entrou na sala geral. Online: ${qtdOnline}.`
+      );
+    }
+  );
+
+  // 🚚 CONFIRMAÇÃO DE ENTREGA AO DISPOSITIVO
+  socket.on('confirmar_entrega', dados => {
+    if (!dados?.id || !dados?.sala) return;
+
+    const codigoSala = normalizarCodigoSala(dados.sala);
+
+    if (!socketEstaNaSala(socket, codigoSala)) return;
+
+    const chaveDestino = obterChaveDispositivo(
+      dados.deviceId || socket.data.deviceId,
+      socket.data.tokenPush
+    );
+
+    if (!chaveDestino) return;
+
+    garantirControleEntrega(chaveDestino);
+    controleDeEntregas[chaveDestino].add(dados.id);
+
+    console.log(
+      `[ENTREGA] Dispositivo anônimo confirmou ${dados.id}.`
+    );
   });
 
   // 🚨 ALERTA GLOBAL
   socket.on('alerta_global_enviar', msg => {
     io.emit('alerta_geral_recebido', msg);
+
     const todosTokens = new Set();
+
     Object.values(salasAtivas).forEach(sala => {
-      sala.tokens.forEach(token => { todosTokens.add(token); });
-    });
-    enviarNotificacao(Array.from(todosTokens), '🚨 ATENÇÃO GLOBAL', 'Alguém acionou o RANKING!');
-  });
-
-  // 💬 ENVIAR MENSAGEM
-  socket.on('enviar_fantasma', async dados => {
-    if (!dados || !dados.sala) return;
-
-    const mensagemFinal = {
-      ...dados,
-      id: gerarId(),
-      hora: new Date().toLocaleTimeString(),
-      timestamp: Date.now(),
-      lida: false
-    };
-
-    // 🔒 SALVAR CRIPTOGRAFADO (AGORA PROTEGENDO O CAMPO 'conteudo')
-    if (db) {
-      try {
-        const mensagemBlindada = { ...mensagemFinal };
-        
-        // A chave 'conteudo' cobre texto, base64 de áudio e base64 de imagem do seu app
-        if (mensagemBlindada.conteudo) {
-            mensagemBlindada.conteudo = encrypt(mensagemBlindada.conteudo);
-        }
-        
-        await db.collection('MensagensTemporarias').add(mensagemBlindada);
-      } catch (error) {}
-    }
-
-    // 🚚 ENTREGA VIP
-    try {
-      const socketsNaSala = await io.in(dados.sala).fetchSockets();
-
-      socketsNaSala.forEach(soc => {
-        if (soc.id !== socket.id) {
-          soc.emit('receber_fantasma', mensagemFinal);
-          
-          const chaveDestino = soc.data.deviceId || soc.data.tokenPush;
-          if (chaveDestino) {
-            garantirControleEntrega(chaveDestino);
-            controleDeEntregas[chaveDestino].add(mensagemFinal.id);
-          }
-        }
+      sala.tokens.forEach(token => {
+        todosTokens.add(token);
       });
-    } catch (error) {}
+    });
+
+    enviarNotificacao(
+      Array.from(todosTokens),
+      '🚨 ATENÇÃO GLOBAL',
+      'Alguém acionou o RANKING!'
+    );
   });
 
-  // 📞 WEBRTC
-  socket.on('webrtc_offer', dados => {
-    socket.to(dados.sala).emit('chamada_recebida', { offer: dados.offer, tipo: dados.tipo });
-  });
+  // 💬 ENVIAR MENSAGEM COM ID ESTÁVEL, DEDUPLICAÇÃO E ACK
+  socket.on(
+    'enviar_fantasma',
+    async (dados, callback) => {
+      if (!dados?.sala) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Sala ausente.'
+        });
+        return;
+      }
+
+      const codigoSala = normalizarCodigoSala(dados.sala);
+
+      if (!socketEstaNaSala(socket, codigoSala)) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Reconecte-se à sala antes de enviar.'
+        });
+        return;
+      }
+
+      const idFinal = idMensagemValido(dados.id)
+        ? dados.id
+        : gerarId();
+
+      let tamanhoConteudo = 0;
+
+      try {
+        tamanhoConteudo =
+          typeof dados.conteudo === 'string'
+            ? dados.conteudo.length
+            : JSON.stringify(dados.conteudo || '').length;
+      } catch (error) {
+        tamanhoConteudo = Number.MAX_SAFE_INTEGER;
+      }
+
+      if (
+        !dados.conteudo ||
+        tamanhoConteudo > 9_000_000
+      ) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Conteúdo vazio ou acima do limite.'
+        });
+        return;
+      }
+
+      const processadaEmMemoria = obterMensagemProcessada(
+        codigoSala,
+        idFinal
+      );
+
+      if (processadaEmMemoria) {
+        responder(callback, {
+          status: 'ok',
+          id: idFinal,
+          hora: processadaEmMemoria.hora,
+          timestamp: processadaEmMemoria.timestamp,
+          duplicada: true
+        });
+
+        console.log(
+          `[DEDUPLICAÇÃO] Reenvio ${idFinal} reconhecido em RAM.`
+        );
+        return;
+      }
+
+      const existenteNoBanco =
+        await mensagemJaExisteNoBanco(
+          codigoSala,
+          idFinal
+        );
+
+      if (existenteNoBanco) {
+        registrarMensagemProcessada(
+          codigoSala,
+          idFinal,
+          {
+            hora: existenteNoBanco.hora,
+            timestamp: existenteNoBanco.timestamp
+          }
+        );
+
+        responder(callback, {
+          status: 'ok',
+          id: idFinal,
+          hora: existenteNoBanco.hora,
+          timestamp: existenteNoBanco.timestamp,
+          duplicada: true
+        });
+
+        console.log(
+          `[DEDUPLICAÇÃO] Reenvio ${idFinal} reconhecido no Firestore.`
+        );
+        return;
+      }
+
+      const timestamp = Date.now();
+      const hora = new Date(timestamp)
+        .toLocaleTimeString();
+
+      const mensagemFinal = {
+        ...dados,
+        id: idFinal,
+        sala: codigoSala,
+        autor: 'Remetente',
+        deviceId:
+          socket.data.deviceId ||
+          dados.deviceId ||
+          null,
+        tokenRemetente:
+          socket.data.tokenPush ||
+          dados.tokenRemetente ||
+          null,
+        pendente: false,
+        hora,
+        timestamp,
+        lida: false,
+        lidaEm: null
+      };
+
+      if (db) {
+        try {
+          const mensagemBlindada = {
+            ...mensagemFinal
+          };
+
+          const {
+            conteudoProtegido,
+            conteudoFormato
+          } = protegerConteudoParaBanco(
+            mensagemBlindada.conteudo
+          );
+
+          mensagemBlindada.conteudo =
+            conteudoProtegido;
+
+          mensagemBlindada.conteudoFormato =
+            conteudoFormato;
+
+          await db
+            .collection('MensagensTemporarias')
+            .add(mensagemBlindada);
+
+          console.log(
+            `[BANCO] Mensagem ${idFinal} salva criptografada.`
+          );
+        } catch (error) {
+          console.log(
+            `[BANCO] Falha ao salvar ${idFinal}:`,
+            error
+          );
+
+          responder(callback, {
+            status: 'erro',
+            msg: 'Falha ao persistir a mensagem.'
+          });
+          return;
+        }
+      }
+
+      registrarMensagemProcessada(
+        codigoSala,
+        idFinal,
+        { hora, timestamp }
+      );
+
+      const {
+        tokenRemetente,
+        deviceId,
+        ...mensagemPublica
+      } = mensagemFinal;
+
+      try {
+        const socketsNaSala = await io
+          .in(codigoSala)
+          .fetchSockets();
+
+        for (const destino of socketsNaSala) {
+          if (destino.id === socket.id) continue;
+
+          destino.emit(
+            'receber_fantasma',
+            mensagemPublica
+          );
+
+          // Não marcamos como entregue neste ponto. O destinatário confirma
+          // explicitamente pelo evento confirmar_entrega após processar a mensagem.
+        }
+
+        console.log(
+          `[ENTREGA] Mensagem ${idFinal} distribuída na sala ${codigoSala}.`
+        );
+      } catch (error) {
+        console.log(
+          `[ENTREGA] Falha ao distribuir ${idFinal}:`,
+          error
+        );
+      }
+
+      responder(callback, {
+        status: 'ok',
+        id: idFinal,
+        hora,
+        timestamp,
+        duplicada: false
+      });
+    }
+  );
+
+  // 📞 WEBRTC DIRECIONADO PARA EXATAMENTE DOIS PARTICIPANTES
+  socket.on(
+    'webrtc_offer',
+    async (dados, callback) => {
+      if (!dados?.sala || !dados?.offer) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Oferta inválida.'
+        });
+        return;
+      }
+
+      const codigoSala = normalizarCodigoSala(
+        dados.sala
+      );
+
+      if (!socketEstaNaSala(socket, codigoSala)) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Você não pertence à sala.'
+        });
+        return;
+      }
+
+      const socketsNaSala = await io
+        .in(codigoSala)
+        .fetchSockets();
+
+      const destinos = socketsNaSala.filter(
+        item => item.id !== socket.id
+      );
+
+      if (destinos.length === 0) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Nenhuma outra pessoa está online.'
+        });
+        return;
+      }
+
+      if (destinos.length > 1) {
+        responder(callback, {
+          status: 'erro',
+          msg:
+            'A chamada individual exige exatamente duas pessoas na sala.'
+        });
+        return;
+      }
+
+      const destino = destinos[0];
+      const callId = gerarId();
+
+      chamadasAtivas.set(callId, {
+        callId,
+        sala: codigoSala,
+        chamador: socket.id,
+        receptor: destino.id,
+        tipo:
+          dados.tipo === 'video'
+            ? 'video'
+            : 'audio',
+        criadaEm: Date.now()
+      });
+
+      socket.data.callId = callId;
+      destino.data.callId = callId;
+
+      destino.emit('chamada_recebida', {
+        callId,
+        origemSocketId: socket.id,
+        offer: dados.offer,
+        tipo:
+          dados.tipo === 'video'
+            ? 'video'
+            : 'audio'
+      });
+
+      responder(callback, {
+        status: 'ok',
+        callId,
+        destinoSocketId: destino.id
+      });
+
+      console.log(
+        `[WEBRTC] Oferta ${callId}: ${socket.id} -> ${destino.id}.`
+      );
+    }
+  );
 
   socket.on('webrtc_answer', dados => {
-    socket.to(dados.sala).emit('resposta_chamada', { answer: dados.answer });
+    const chamada = obterChamadaDoSocket(
+      dados?.callId
+    );
+
+    if (!chamada || !dados?.answer) {
+      console.log('[WEBRTC] Resposta ignorada: chamada inexistente.');
+      return;
+    }
+
+    const destinoCorreto = obterOutroParticipante(
+      chamada,
+      socket.id
+    );
+
+    if (
+      !destinoCorreto ||
+      (
+        dados.destinoSocketId &&
+        dados.destinoSocketId !== destinoCorreto
+      )
+    ) {
+      console.log(
+        `[WEBRTC] Resposta inválida para ${dados?.callId}.`
+      );
+      return;
+    }
+
+    io.to(destinoCorreto).emit(
+      'resposta_chamada',
+      {
+        callId: dados.callId,
+        origemSocketId: socket.id,
+        answer: dados.answer
+      }
+    );
+
+    console.log(
+      `[WEBRTC] Resposta ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`
+    );
   });
 
   socket.on('webrtc_ice_candidate', dados => {
-    socket.to(dados.sala).emit('receber_ice_candidate', { candidate: dados.candidate });
+    const chamada = obterChamadaDoSocket(
+      dados?.callId
+    );
+
+    if (!chamada || !dados?.candidate) {
+      return;
+    }
+
+    const destinoCorreto = obterOutroParticipante(
+      chamada,
+      socket.id
+    );
+
+    if (
+      !destinoCorreto ||
+      (
+        dados.destinoSocketId &&
+        dados.destinoSocketId !== destinoCorreto
+      )
+    ) {
+      console.log(
+        `[WEBRTC] ICE inválido para ${dados?.callId}.`
+      );
+      return;
+    }
+
+    io.to(destinoCorreto).emit(
+      'receber_ice_candidate',
+      {
+        callId: dados.callId,
+        origemSocketId: socket.id,
+        candidate: dados.candidate
+      }
+    );
+  });
+
+  socket.on('webrtc_reject', dados => {
+    const chamada = obterChamadaDoSocket(
+      dados?.callId
+    );
+
+    if (!chamada) return;
+
+    const destinoCorreto = obterOutroParticipante(
+      chamada,
+      socket.id
+    );
+
+    if (destinoCorreto) {
+      io.to(destinoCorreto).emit(
+        'chamada_recusada',
+        {
+          callId: dados.callId,
+          motivo:
+            dados.motivo ||
+            'Chamada recusada.'
+        }
+      );
+    }
+
+    chamadasAtivas.delete(dados.callId);
+    console.log(`[WEBRTC] Chamada ${dados.callId} recusada.`);
+  });
+
+  socket.on('webrtc_busy', dados => {
+    const destinoSocketId = dados?.destinoSocketId;
+
+    if (!destinoSocketId) return;
+
+    io.to(destinoSocketId).emit(
+      'chamada_ocupada',
+      {
+        callId: dados.callId,
+        motivo:
+          'A outra pessoa já está em uma chamada.'
+      }
+    );
+
+    if (dados.callId) {
+      chamadasAtivas.delete(dados.callId);
+    }
   });
 
   socket.on('desligar_chamada', dados => {
-    socket.to(dados.sala).emit('chamada_encerrada');
+    const chamada = obterChamadaDoSocket(
+      dados?.callId
+    );
+
+    if (!chamada) return;
+
+    const destinoCorreto = obterOutroParticipante(
+      chamada,
+      socket.id
+    );
+
+    if (destinoCorreto) {
+      io.to(destinoCorreto).emit(
+        'chamada_encerrada',
+        {
+          callId: dados.callId,
+          motivo:
+            dados.motivo ||
+            'Chamada encerrada.'
+        }
+      );
+    }
+
+    chamadasAtivas.delete(dados.callId);
+    console.log(`[WEBRTC] Chamada ${dados.callId} encerrada.`);
   });
 
   // 🏆 RANKING
-  socket.on('novo_recorde_anonimo', async ({ jogo, pontos }) => {
-    if (!db || !jogo || pontos === undefined || pontos === null) return;
-    try {
-      await db.collection(`Ranking_${jogo}`).add({ pontos, timestamp: Date.now() });
-      const snapshot = await db.collection(`Ranking_${jogo}`).orderBy('pontos', 'desc').limit(3).get();
-      const top3 = [];
-      snapshot.forEach(doc => { top3.push(doc.data()); });
-      io.emit('atualizar_ranking', { [jogo]: top3 });
-    } catch (error) {}
-  });
+  socket.on(
+    'novo_recorde_anonimo',
+    async ({ jogo, pontos } = {}) => {
+      if (
+        !db ||
+        !jogo ||
+        pontos === undefined ||
+        pontos === null
+      ) {
+        return;
+      }
+
+      try {
+        await db
+          .collection(`Ranking_${jogo}`)
+          .add({
+            pontos,
+            timestamp: Date.now()
+          });
+
+        const snapshot = await db
+          .collection(`Ranking_${jogo}`)
+          .orderBy('pontos', 'desc')
+          .limit(3)
+          .get();
+
+        const top3 = [];
+
+        snapshot.forEach(doc => {
+          top3.push(doc.data());
+        });
+
+        io.emit('atualizar_ranking', {
+          [jogo]: top3
+        });
+      } catch (error) {
+        console.log(
+          `[RANKING] Falha ao registrar ${jogo}:`,
+          error
+        );
+      }
+    }
+  );
 
   socket.on('pedir_ranking', async () => {
     if (!db) return;
+
     try {
-      const rankings = { bolhas: [], tetris: [], dino: [], reflexo: [], frenesi: [] };
-      const jogos = ['bolhas', 'tetris', 'dino', 'reflexo', 'frenesi'];
+      const rankings = {
+        bolhas: [],
+        tetris: [],
+        dino: [],
+        reflexo: [],
+        frenesi: []
+      };
+
+      const jogos = [
+        'bolhas',
+        'tetris',
+        'dino',
+        'reflexo',
+        'frenesi'
+      ];
+
       for (const jogo of jogos) {
-        const snapshot = await db.collection(`Ranking_${jogo}`).orderBy('pontos', 'desc').limit(3).get();
-        snapshot.forEach(doc => { rankings[jogo].push(doc.data()); });
+        const snapshot = await db
+          .collection(`Ranking_${jogo}`)
+          .orderBy('pontos', 'desc')
+          .limit(3)
+          .get();
+
+        snapshot.forEach(doc => {
+          rankings[jogo].push(doc.data());
+        });
       }
-      socket.emit('atualizar_ranking', rankings);
-    } catch (error) {}
+
+      socket.emit(
+        'atualizar_ranking',
+        rankings
+      );
+    } catch (error) {
+      console.log(
+        '[RANKING] Falha ao carregar ranking:',
+        error
+      );
+    }
   });
 
   // 🚪 SAIR DA SALA / DISCONNECT
-  const lidarComSaida = () => {
+  const lidarComSaida = motivo => {
     const salaAtual = socket.data.salaAtual;
+
+    encerrarChamadasDoSocket(
+      motivo || 'Participante desconectado.'
+    );
+
     if (salaAtual) {
       socket.leave(salaAtual);
       socket.data.salaAtual = null;
@@ -553,8 +1652,16 @@ io.on('connection', socket => {
     }
   };
 
-  socket.on('sair_sala', lidarComSaida);
-  socket.on('disconnect', lidarComSaida);
+  socket.on('sair_sala', () => {
+    lidarComSaida('Participante saiu da sala.');
+  });
+
+  socket.on('disconnect', motivo => {
+    lidarComSaida('Participante desconectado.');
+    console.log(
+      `[SOCKET] Conexão anônima ${socket.id} encerrada: ${motivo}`
+    );
+  });
 });
 
 // =====================================================
