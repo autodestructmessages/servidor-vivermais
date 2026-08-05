@@ -274,11 +274,87 @@ function garantirSala(codigo, senha = null, criador = 'SISTEMA') {
   return salasAtivas[codigo];
 }
 
-function atualizarContagemSala(codigoSala) {
+function obterChavePresencaSocket(socketId) {
+  const socketSala = io.sockets.sockets.get(socketId);
+  const deviceId = socketSala?.data?.deviceId;
+
+  return deviceId
+    ? `device:${deviceId}`
+    : `socket:${socketId}`;
+}
+
+function contarDispositivosUnicosNaSala(codigoSala) {
   const room = io.sockets.adapter.rooms.get(codigoSala);
-  const qtdOnline = room ? room.size : 0;
-  io.to(codigoSala).emit('atualizar_contagem_online', qtdOnline);
+  if (!room) return 0;
+
+  const dispositivos = new Set();
+
+  room.forEach(socketId => {
+    dispositivos.add(
+      obterChavePresencaSocket(socketId)
+    );
+  });
+
+  return dispositivos.size;
+}
+
+function atualizarContagemSala(codigoSala) {
+  const qtdOnline =
+    contarDispositivosUnicosNaSala(codigoSala);
+
+  io.to(codigoSala).emit(
+    'atualizar_contagem_online',
+    qtdOnline
+  );
+
+  console.log(
+    `[PRESENÇA] Sala ${codigoSala}: ${qtdOnline} dispositivo(s) único(s).`
+  );
+
   return qtdOnline;
+}
+
+// Quando o aparelho troca Wi-Fi por dados móveis, o Socket.IO cria uma nova
+// conexão antes de a antiga expirar. Esta função remove imediatamente a conexão
+// antiga do mesmo deviceId para impedir contagem duplicada e mistura no WebRTC.
+async function substituirConexaoAnteriorDoDispositivo(
+  socketAtual,
+  codigoSala,
+  deviceId
+) {
+  if (!socketAtual || !codigoSala || !deviceId) {
+    return;
+  }
+
+  const socketsNaSala = await io
+    .in(codigoSala)
+    .fetchSockets();
+
+  const duplicadas = socketsNaSala.filter(item =>
+    item.id !== socketAtual.id &&
+    item.data?.deviceId === deviceId
+  );
+
+  for (const socketAntigo of duplicadas) {
+    try {
+      console.log(
+        `[PRESENÇA] Substituindo socket antigo ${socketAntigo.id} pelo novo ${socketAtual.id} do dispositivo ${deviceId}.`
+      );
+
+      socketAntigo.emit('sessao_substituida', {
+        motivo: 'O mesmo dispositivo reconectou por outra rede.'
+      });
+
+      socketAntigo.data.salaAtual = null;
+      await socketAntigo.leave(codigoSala);
+      socketAntigo.disconnect(true);
+    } catch (erro) {
+      console.log(
+        `[PRESENÇA] Falha ao remover socket duplicado ${socketAntigo.id}:`,
+        erro
+      );
+    }
+  }
 }
 
 function adicionarTokenNaSala(codigoSala, tokenPush) {
@@ -300,8 +376,8 @@ function garantirControleEntrega(chaveIdentificacao) {
 function verificarDestruicaoSala(codigoSala) {
   if (!codigoSala || codigoSala === 'SALA_GERAL') return;
 
-  const room = io.sockets.adapter.rooms.get(codigoSala);
-  const qtdOnline = room ? room.size : 0;
+  const qtdOnline =
+    contarDispositivosUnicosNaSala(codigoSala);
 
   // Atualizado para 48 HORAS (172800000 ms) para acompanhar a retenção de mensagens
   if (qtdOnline === 0) {
@@ -612,6 +688,8 @@ app.get('/', (req, res) => {
 // =====================================================
 
 io.on('connection', socket => {
+  socket.data.conectadoEm = Date.now();
+
   console.log(`[SOCKET] Conexão anônima aberta: ${socket.id}`);
 
   const responder = (callback, payload) => {
@@ -666,7 +744,7 @@ io.on('connection', socket => {
   // 📦 ATUALIZAÇÃO APK
   const VERSAO_MINIMA_APP = '12.0.0';
   const LINK_NOVO_APK =
-    'https://drive.google.com/file/d/1UqQhYHsgBwm6TU_1OQLigIrtpYH6iN7k/view?usp=sharing';
+    'https://drive.google.com/drive/folders/1GmDMyRgzQBhdVTWmclKZ2V_pjiCtrhRZ?usp=sharing';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
@@ -905,6 +983,12 @@ io.on('connection', socket => {
       socket.data.tokenPush = tokenPush || null;
       socket.data.deviceId = deviceId || null;
 
+      await substituirConexaoAnteriorDoDispositivo(
+        socket,
+        codigoNormalizado,
+        deviceId
+      );
+
       await socket.join(codigoNormalizado);
       atualizarContagemSala(codigoNormalizado);
 
@@ -948,6 +1032,12 @@ io.on('connection', socket => {
       socket.data.tokenPush = tokenPush || null;
       socket.data.deviceId = deviceId || null;
 
+      await substituirConexaoAnteriorDoDispositivo(
+        socket,
+        codigoNormalizado,
+        deviceId
+      );
+
       await socket.join(codigoNormalizado);
       adicionarTokenNaSala(
         codigoNormalizado,
@@ -989,6 +1079,12 @@ io.on('connection', socket => {
       socket.data.salaAtual = codigo;
       socket.data.tokenPush = tokenPush || null;
       socket.data.deviceId = deviceId || null;
+
+      await substituirConexaoAnteriorDoDispositivo(
+        socket,
+        codigo,
+        deviceId
+      );
 
       await socket.join(codigo);
 
@@ -1332,9 +1428,40 @@ io.on('connection', socket => {
         .in(codigoSala)
         .fetchSockets();
 
-      const destinos = socketsNaSala.filter(
-        item => item.id !== socket.id
-      );
+      const deviceIdOrigem = socket.data.deviceId || null;
+      const destinosPorDispositivo = new Map();
+
+      socketsNaSala.forEach(item => {
+        if (item.id === socket.id) return;
+
+        // Uma reconexão do próprio aparelho não pode ser tratada como outro
+        // participante da chamada.
+        if (
+          deviceIdOrigem &&
+          item.data?.deviceId === deviceIdOrigem
+        ) {
+          return;
+        }
+
+        const chave =
+          item.data?.deviceId
+            ? `device:${item.data.deviceId}`
+            : `socket:${item.id}`;
+
+        const existente = destinosPorDispositivo.get(chave);
+
+        if (
+          !existente ||
+          Number(item.data?.conectadoEm || 0) >
+            Number(existente.data?.conectadoEm || 0)
+        ) {
+          destinosPorDispositivo.set(chave, item);
+        }
+      });
+
+      const destinos = [
+        ...destinosPorDispositivo.values()
+      ];
 
       if (destinos.length === 0) {
         responder(callback, {
@@ -1469,6 +1596,150 @@ io.on('connection', socket => {
         origemSocketId: socket.id,
         candidate: dados.candidate
       }
+    );
+  });
+
+  socket.on(
+    'webrtc_restart_offer',
+    (dados, callback) => {
+      const chamada = obterChamadaDoSocket(
+        dados?.callId
+      );
+
+      if (!chamada || !dados?.offer) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Chamada ou oferta de reinício inválida.'
+        });
+        return;
+      }
+
+      const destinoCorreto = obterOutroParticipante(
+        chamada,
+        socket.id
+      );
+
+      if (
+        !destinoCorreto ||
+        (
+          dados.destinoSocketId &&
+          dados.destinoSocketId !== destinoCorreto
+        )
+      ) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Destino do reinício ICE inválido.'
+        });
+        return;
+      }
+
+      io.to(destinoCorreto).emit(
+        'webrtc_restart_offer_received',
+        {
+          callId: dados.callId,
+          origemSocketId: socket.id,
+          offer: dados.offer
+        }
+      );
+
+      responder(callback, {
+        status: 'ok'
+      });
+
+      console.log(
+        `[WEBRTC] Oferta de reinício ICE ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`
+      );
+    }
+  );
+
+  socket.on(
+    'webrtc_restart_answer',
+    (dados, callback) => {
+      const chamada = obterChamadaDoSocket(
+        dados?.callId
+      );
+
+      if (!chamada || !dados?.answer) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Chamada ou resposta de reinício inválida.'
+        });
+        return;
+      }
+
+      const destinoCorreto = obterOutroParticipante(
+        chamada,
+        socket.id
+      );
+
+      if (
+        !destinoCorreto ||
+        (
+          dados.destinoSocketId &&
+          dados.destinoSocketId !== destinoCorreto
+        )
+      ) {
+        responder(callback, {
+          status: 'erro',
+          msg: 'Destino da resposta de reinício inválido.'
+        });
+        return;
+      }
+
+      io.to(destinoCorreto).emit(
+        'webrtc_restart_answer_received',
+        {
+          callId: dados.callId,
+          origemSocketId: socket.id,
+          answer: dados.answer
+        }
+      );
+
+      responder(callback, {
+        status: 'ok'
+      });
+
+      console.log(
+        `[WEBRTC] Resposta de reinício ICE ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`
+      );
+    }
+  );
+
+  socket.on('webrtc_request_restart', dados => {
+    const chamada = obterChamadaDoSocket(
+      dados?.callId
+    );
+
+    if (!chamada) return;
+
+    const destinoCorreto = obterOutroParticipante(
+      chamada,
+      socket.id
+    );
+
+    if (
+      !destinoCorreto ||
+      (
+        dados.destinoSocketId &&
+        dados.destinoSocketId !== destinoCorreto
+      )
+    ) {
+      return;
+    }
+
+    io.to(destinoCorreto).emit(
+      'webrtc_restart_requested',
+      {
+        callId: dados.callId,
+        origemSocketId: socket.id,
+        motivo:
+          dados.motivo ||
+          'O outro aparelho perdeu a rota de mídia.'
+      }
+    );
+
+    console.log(
+      `[WEBRTC] Reinício ICE solicitado em ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`
     );
   });
 
