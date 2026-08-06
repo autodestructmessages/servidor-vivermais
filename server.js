@@ -1,3 +1,4 @@
+// VIVERMAIS V4.3 — SERVIDOR DE CHAT, RANKING E SINALIZAÇÃO WEBRTC DIRECIONADA
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -36,8 +37,8 @@ const io = new Server(server, {
 // TURN_USERNAME=usuario_temporario_ou_rotativo
 // TURN_CREDENTIAL=senha_temporaria_ou_rotativa
 //
-// Os valores atuais permanecem como fallback para não interromper o aplicativo
-// durante a migração. As credenciais devem ser rotacionadas no serviço TURN.
+// As URLs públicas podem permanecer no código, mas usuário e senha são lidos
+// exclusivamente do ambiente do Render para evitar vazamento de credenciais.
 const TURN_URLS = (
   process.env.TURN_URLS ||
   [
@@ -52,13 +53,15 @@ const TURN_URLS = (
   .map(item => item.trim())
   .filter(Boolean);
 
-const TURN_USERNAME =
-  process.env.TURN_USERNAME ||
-  'f96e9418f324e2d4800a5161';
+const TURN_USERNAME = process.env.TURN_USERNAME || '';
 
-const TURN_CREDENTIAL =
-  process.env.TURN_CREDENTIAL ||
-  'SwbxK82x3CVSV8dS';
+const TURN_CREDENTIAL = process.env.TURN_CREDENTIAL || '';
+
+if (TURN_USERNAME && TURN_CREDENTIAL) {
+  console.log(`[WEBRTC] TURN carregado do ambiente com ${TURN_URLS.length} rota(s), sem expor credenciais.`);
+} else {
+  console.log('[WEBRTC] AVISO: TURN_USERNAME ou TURN_CREDENTIAL ausente; chamadas entre redes poderão depender apenas de STUN.');
+}
 
 function montarConfiguracaoICE() {
   const iceServers = [
@@ -249,6 +252,22 @@ const salasVaziasTimers = {};
 const controleDeEntregas = {};
 const mensagensProcessadas = new Map();
 const chamadasAtivas = new Map();
+
+// Lista fechada de modalidades aceitas no ranking. A validação impede que um
+// cliente alterado crie coleções arbitrárias no Firestore.
+const JOGOS_RANKING = Object.freeze([
+  'bolhas',
+  'reflexo',
+  'frenesi',
+  'dino',
+  'tetris',
+  'cobrinha',
+  'quebra_blocos',
+  'memoria',
+  'torre',
+  'meteoros'
+]);
+
 let ultimoPushEntrada = 0;
 
 // =====================================================
@@ -742,9 +761,9 @@ io.on('connection', socket => {
   });
 
   // 📦 ATUALIZAÇÃO APK
-  const VERSAO_MINIMA_APP = '12.0.0';
+  const VERSAO_MINIMA_APP = '14.0.0';
   const LINK_NOVO_APK =
-    'https://drive.google.com/drive/folders/1GmDMyRgzQBhdVTWmclKZ2V_pjiCtrhRZ?usp=sharing';
+    'https://drive.google.com/drive/folders/1GmDMyRgzQBhdVTWmclKZ2V_pjiCtrhRZ';
 
   socket.on('verificar_versao', (versaoApp, callback) => {
     if (versaoApp !== VERSAO_MINIMA_APP) {
@@ -1743,6 +1762,83 @@ io.on('connection', socket => {
     );
   });
 
+  // Encaminha uma nova oferta SDP para recuperar apenas a mídia de vídeo sem
+  // destruir a chamada de áudio que já está funcionando.
+  socket.on('webrtc_media_offer', (dados, callback) => {
+    const chamada = obterChamadaDoSocket(dados?.callId);
+    if (!chamada || !dados?.offer) {
+      responder(callback, { status: 'erro', msg: 'Chamada ou oferta de mídia inválida.' });
+      return;
+    }
+
+    const destinoCorreto = obterOutroParticipante(chamada, socket.id);
+    if (
+      !destinoCorreto ||
+      (dados.destinoSocketId && dados.destinoSocketId !== destinoCorreto)
+    ) {
+      responder(callback, { status: 'erro', msg: 'Destino da renegociação inválido.' });
+      return;
+    }
+
+    io.to(destinoCorreto).emit('webrtc_media_offer_received', {
+      callId: dados.callId,
+      origemSocketId: socket.id,
+      offer: dados.offer,
+      motivo: dados.motivo || 'recuperação de vídeo'
+    });
+
+    responder(callback, { status: 'ok' });
+    console.log(`[WEBRTC] Oferta de mídia ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`);
+  });
+
+  // Encaminha a resposta da renegociação para o peer que gerou a nova oferta.
+  socket.on('webrtc_media_answer', (dados, callback) => {
+    const chamada = obterChamadaDoSocket(dados?.callId);
+    if (!chamada || !dados?.answer) {
+      responder(callback, { status: 'erro', msg: 'Chamada ou resposta de mídia inválida.' });
+      return;
+    }
+
+    const destinoCorreto = obterOutroParticipante(chamada, socket.id);
+    if (
+      !destinoCorreto ||
+      (dados.destinoSocketId && dados.destinoSocketId !== destinoCorreto)
+    ) {
+      responder(callback, { status: 'erro', msg: 'Destino da resposta de mídia inválido.' });
+      return;
+    }
+
+    io.to(destinoCorreto).emit('webrtc_media_answer_received', {
+      callId: dados.callId,
+      origemSocketId: socket.id,
+      answer: dados.answer
+    });
+
+    responder(callback, { status: 'ok' });
+    console.log(`[WEBRTC] Resposta de mídia ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`);
+  });
+
+  // Permite que o receptor peça ao chamador uma nova oferta. Manter o chamador
+  // como ofertante evita glare e estados de sinalização concorrentes.
+  socket.on('webrtc_request_media_renegotiation', dados => {
+    const chamada = obterChamadaDoSocket(dados?.callId);
+    if (!chamada) return;
+
+    const destinoCorreto = obterOutroParticipante(chamada, socket.id);
+    if (
+      !destinoCorreto ||
+      (dados.destinoSocketId && dados.destinoSocketId !== destinoCorreto)
+    ) return;
+
+    io.to(destinoCorreto).emit('webrtc_media_renegotiation_requested', {
+      callId: dados.callId,
+      origemSocketId: socket.id,
+      motivo: dados.motivo || 'o outro aparelho não recebeu frames de vídeo'
+    });
+
+    console.log(`[WEBRTC] Renegociação de mídia solicitada em ${dados.callId}: ${socket.id} -> ${destinoCorreto}.`);
+  });
+
   socket.on('webrtc_reject', dados => {
     const chamada = obterChamadaDoSocket(
       dados?.callId
@@ -1818,93 +1914,59 @@ io.on('connection', socket => {
     console.log(`[WEBRTC] Chamada ${dados.callId} encerrada.`);
   });
 
-  // 🏆 RANKING
-  socket.on(
-    'novo_recorde_anonimo',
-    async ({ jogo, pontos } = {}) => {
-      if (
-        !db ||
-        !jogo ||
-        pontos === undefined ||
-        pontos === null
-      ) {
-        return;
-      }
+  // 🏆 RANKING GLOBAL ANÔNIMO
+  socket.on('novo_recorde_anonimo', async ({ jogo, pontos } = {}) => {
+    const pontosValidos = Math.max(0, Math.min(100000000, Math.floor(Number(pontos) || 0)));
 
-      try {
-        await db
-          .collection(`Ranking_${jogo}`)
-          .add({
-            pontos,
-            timestamp: Date.now()
-          });
-
-        const snapshot = await db
-          .collection(`Ranking_${jogo}`)
-          .orderBy('pontos', 'desc')
-          .limit(3)
-          .get();
-
-        const top3 = [];
-
-        snapshot.forEach(doc => {
-          top3.push(doc.data());
-        });
-
-        io.emit('atualizar_ranking', {
-          [jogo]: top3
-        });
-      } catch (error) {
-        console.log(
-          `[RANKING] Falha ao registrar ${jogo}:`,
-          error
-        );
-      }
+    if (!db || !JOGOS_RANKING.includes(jogo) || pontosValidos <= 0) {
+      console.log(`[RANKING] Resultado rejeitado. jogo=${jogo}; pontos=${pontos}.`);
+      return;
     }
-  );
 
+    try {
+      await db.collection(`Ranking_${jogo}`).add({
+        pontos: pontosValidos,
+        timestamp: Date.now()
+      });
+
+      const snapshot = await db
+        .collection(`Ranking_${jogo}`)
+        .orderBy('pontos', 'desc')
+        .limit(3)
+        .get();
+
+      const top3 = snapshot.docs.map(documento => documento.data());
+      io.emit('atualizar_ranking', { [jogo]: top3 });
+      console.log(`[RANKING] Recorde anônimo registrado: ${jogo}=${pontosValidos}.`);
+    } catch (error) {
+      console.log(`[RANKING] Falha ao registrar ${jogo}:`, error);
+    }
+  });
+
+  // Carrega as dez modalidades de forma isolada: falha em uma coleção não
+  // impede o retorno das demais classificações.
   socket.on('pedir_ranking', async () => {
     if (!db) return;
 
-    try {
-      const rankings = {
-        bolhas: [],
-        tetris: [],
-        dino: [],
-        reflexo: [],
-        frenesi: []
-      };
+    const rankings = JOGOS_RANKING.reduce(
+      (mapa, jogo) => ({ ...mapa, [jogo]: [] }),
+      {}
+    );
 
-      const jogos = [
-        'bolhas',
-        'tetris',
-        'dino',
-        'reflexo',
-        'frenesi'
-      ];
-
-      for (const jogo of jogos) {
+    for (const jogo of JOGOS_RANKING) {
+      try {
         const snapshot = await db
           .collection(`Ranking_${jogo}`)
           .orderBy('pontos', 'desc')
           .limit(3)
           .get();
-
-        snapshot.forEach(doc => {
-          rankings[jogo].push(doc.data());
-        });
+        rankings[jogo] = snapshot.docs.map(documento => documento.data());
+      } catch (error) {
+        console.log(`[RANKING] Falha ao carregar ${jogo}:`, error.message);
       }
-
-      socket.emit(
-        'atualizar_ranking',
-        rankings
-      );
-    } catch (error) {
-      console.log(
-        '[RANKING] Falha ao carregar ranking:',
-        error
-      );
     }
+
+    socket.emit('atualizar_ranking', rankings);
   });
 
   // 🚪 SAIR DA SALA / DISCONNECT
