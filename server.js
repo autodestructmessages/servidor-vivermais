@@ -268,7 +268,8 @@ const JOGOS_RANKING = Object.freeze([
   'meteoros'
 ]);
 
-let ultimoPushEntrada = 0;
+// Controla o cooldown de notificações por sala para impedir spam sem bloquear outras salas.
+const ultimoPushEntradaPorSala = new Map();
 
 // =====================================================
 // 🔧 FUNÇÕES AUXILIARES
@@ -405,6 +406,7 @@ function verificarDestruicaoSala(codigoSala) {
     salasVaziasTimers[codigoSala] = setTimeout(() => {
       if (salasAtivas[codigoSala]) {
         delete salasAtivas[codigoSala];
+        ultimoPushEntradaPorSala.delete(codigoSala);
         console.log(`🧹 Sala oculta [${codigoSala}] fechada após 48 horas sem ninguém.`);
       }
       delete salasVaziasTimers[codigoSala];
@@ -657,14 +659,31 @@ setInterval(lixeiroAutomatico, 10 * 60 * 1000);
 // 📲 PUSH NOTIFICATION
 // =====================================================
 
-async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarregada!', corpoPush = 'Sua vida no ViverMais recarregou!') {
-  if (!Array.isArray(tokensDestino)) return;
+/**
+ * Envia notificações pelo Expo Push Service.
+ * Aceita tanto ExpoPushToken[...] quanto o formato legado ExponentPushToken[...].
+ * A resposta do Expo é registrada para facilitar diagnóstico sem expor o token completo.
+ */
+async function enviarNotificacao(
+  tokensDestino,
+  tituloPush = '🏆 Novo recorde registrado!',
+  corpoPush = 'Um novo recorde foi registrado no ranking global.'
+) {
+  if (!Array.isArray(tokensDestino)) {
+    console.log('[PUSH] Lista de destinos inválida; envio ignorado.');
+    return { enviados: 0, ignorados: 0 };
+  }
 
-  const validTokens = tokensDestino.filter(token => {
-    return (token && typeof token === 'string' && token.startsWith('ExponentPushToken'));
+  // Remove duplicatas e aceita os dois prefixos válidos usados pelo Expo.
+  const validTokens = Array.from(new Set(tokensDestino)).filter(token => {
+    if (!token || typeof token !== 'string') return false;
+    return /^(?:ExpoPushToken|ExponentPushToken)\[[^\]]+\]$/.test(token.trim());
   });
 
-  if (validTokens.length === 0) return;
+  if (validTokens.length === 0) {
+    console.log(`[PUSH] Nenhum Expo Push Token válido entre ${tokensDestino.length} destino(s).`);
+    return { enviados: 0, ignorados: tokensDestino.length };
+  }
 
   const mensagensPush = validTokens.map(token => ({
     to: token,
@@ -672,11 +691,15 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
     title: tituloPush,
     body: corpoPush,
     priority: 'high',
-    data: { segredo: true }
+    channelId: 'mensagens_privadas_v2',
+    data: {
+      segredo: true,
+      tipo: 'ranking_mascarado'
+    }
   }));
 
   try {
-    await fetch('https://exp.host/--/api/v2/push/send', {
+    const resposta = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -685,7 +708,48 @@ async function enviarNotificacao(tokensDestino, tituloPush = '⚡ Energia Recarr
       },
       body: JSON.stringify(mensagensPush)
     });
-  } catch (error) {}
+
+    const corpoResposta = await resposta.text();
+
+    if (!resposta.ok) {
+      console.log(`[PUSH] Expo respondeu HTTP ${resposta.status}: ${corpoResposta.slice(0, 500)}`);
+      return { enviados: 0, ignorados: 0, erroHttp: resposta.status };
+    }
+
+    console.log(`[PUSH] Solicitação aceita pelo Expo para ${validTokens.length} dispositivo(s). Resposta: ${corpoResposta.slice(0, 500)}`);
+    return { enviados: validTokens.length, ignorados: tokensDestino.length - validTokens.length };
+  } catch (error) {
+    console.log('[PUSH] Falha de rede ao chamar Expo Push Service:', error?.message || error);
+    return { enviados: 0, ignorados: 0, erro: true };
+  }
+}
+
+/**
+ * Controla o intervalo mínimo entre alertas de entrada de uma mesma sala.
+ * O mapa é podado para evitar crescimento indefinido em servidores de longa duração.
+ */
+function podeEnviarPushEntrada(codigoSala, intervaloMs = 120000) {
+  if (!codigoSala) return false;
+
+  const agora = Date.now();
+  const ultimoEnvio = ultimoPushEntradaPorSala.get(codigoSala) || 0;
+
+  if (agora - ultimoEnvio <= intervaloMs) {
+    console.log(`[PUSH] Entrada em ${codigoSala} dentro do cooldown; alerta mascarado não repetido.`);
+    return false;
+  }
+
+  ultimoPushEntradaPorSala.set(codigoSala, agora);
+
+  // Limpeza defensiva: remove registros com mais de 48 horas caso muitas salas sejam criadas.
+  if (ultimoPushEntradaPorSala.size > 500) {
+    const limite = agora - (48 * 60 * 60 * 1000);
+    for (const [sala, timestamp] of ultimoPushEntradaPorSala.entries()) {
+      if (timestamp < limite) ultimoPushEntradaPorSala.delete(sala);
+    }
+  }
+
+  return true;
 }
 
 // =====================================================
@@ -1002,6 +1066,15 @@ io.on('connection', socket => {
       socket.data.tokenPush = tokenPush || null;
       socket.data.deviceId = deviceId || null;
 
+      // Verifica se esta entrada é apenas a reconexão do mesmo aparelho após troca de rede.
+      // Nesse caso preservamos a sessão, mas não geramos uma falsa notificação de nova pessoa.
+      const socketsAntesDaEntrada = await io.in(codigoNormalizado).fetchSockets();
+      const reconexaoMesmoDispositivo = Boolean(
+        deviceId && socketsAntesDaEntrada.some(item =>
+          item.id !== socket.id && item.data?.deviceId === deviceId
+        )
+      );
+
       await substituirConexaoAnteriorDoDispositivo(
         socket,
         codigoNormalizado,
@@ -1077,6 +1150,22 @@ io.on('connection', socket => {
         deviceId
       );
 
+      // Restaura o alerta discreto de entrada na sala privada. A mensagem não revela
+      // a existência do chat e aparece como uma atualização normal do ranking.
+      if (!reconexaoMesmoDispositivo && podeEnviarPushEntrada(codigoNormalizado)) {
+        const tokensParaAvisar = sala.tokens.filter(token => token && token !== tokenPush);
+
+        if (tokensParaAvisar.length > 0) {
+          await enviarNotificacao(
+            tokensParaAvisar,
+            '🏆 Novo recorde registrado!',
+            'Um novo recorde foi registrado no ranking global.'
+          );
+        } else {
+          console.log(`[PUSH] Sala privada ${codigoNormalizado} ainda não possui outro token para avisar.`);
+        }
+      }
+
       console.log(
         `[SALA] Socket ${socket.id} entrou na sala privada ${codigoNormalizado}.`
       );
@@ -1098,6 +1187,14 @@ io.on('connection', socket => {
       socket.data.salaAtual = codigo;
       socket.data.tokenPush = tokenPush || null;
       socket.data.deviceId = deviceId || null;
+
+      // Detecta reconexão do mesmo dispositivo para não mascará-la como nova entrada.
+      const socketsAntesDaEntradaGeral = await io.in(codigo).fetchSockets();
+      const reconexaoMesmoDispositivoGeral = Boolean(
+        deviceId && socketsAntesDaEntradaGeral.some(item =>
+          item.id !== socket.id && item.data?.deviceId === deviceId
+        )
+      );
 
       await substituirConexaoAnteriorDoDispositivo(
         socket,
@@ -1142,22 +1239,20 @@ io.on('connection', socket => {
       // A antiga mensagem "MODO SEGURO..." foi removida.
       // A ausência de outra pessoa é indicada somente pela contagem online.
 
-      if (sala.tokens.length > 1) {
-        const agora = Date.now();
+      if (
+        !reconexaoMesmoDispositivoGeral &&
+        sala.tokens.length > 1 &&
+        podeEnviarPushEntrada(codigo)
+      ) {
+        const tokensParaAvisar = sala.tokens.filter(
+          token => token && token !== tokenPush
+        );
 
-        if (agora - ultimoPushEntrada > 120000) {
-          const tokensParaAvisar = sala.tokens.filter(
-            token => token !== tokenPush
-          );
-
-          enviarNotificacao(
-            tokensParaAvisar,
-            '🏆 Novo Competidor!',
-            'Alguém entrou no ViverMais.'
-          );
-
-          ultimoPushEntrada = agora;
-        }
+        await enviarNotificacao(
+          tokensParaAvisar,
+          '🏆 Novo recorde registrado!',
+          'Um novo recorde foi registrado no ranking global.'
+        );
       }
 
       console.log(
